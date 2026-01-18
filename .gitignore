@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# State files (local runtime data)
+state/*.json
+
+# Config files are NOT ignored (user preferences should be preserved)
+# config/*.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcworkspace
+!*.xcodeproj/project.xcworkspace/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Build artifacts
+HomeMCPBridge.app/
+
+# Local MCP config (user-specific paths)
+.mcp.json
+
+# Claude settings
+.claude/
+
+# Node modules
+node_modules/
+package-lock.json
+
+# Old Python/Homebridge experiments (not part of main app)
+homebridge-homemcp/
+server.py
+tools/
+discovery/
+tests/
+config/
+state/
