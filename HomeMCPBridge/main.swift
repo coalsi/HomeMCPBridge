@@ -1,6 +1,7 @@
 import Foundation
 import HomeKit
 import UIKit
+import Network
 
 #if targetEnvironment(macCatalyst)
 import AppKit
@@ -1122,8 +1123,10 @@ class ScryptedPlugin: DevicePlugin {
     func initialize() async throws {
         guard isConfigured else { throw PluginError.notConfigured }
         try await authenticate()
-        _ = try await fetchDevices()
-        log("Scrypted plugin initialized with \(cachedDevices.count) devices, \(cachedCameras.count) cameras")
+
+        // Scrypted uses MQTT for camera discovery - configure MQTT in Settings
+        let mqttCameras = ScryptedMQTTManager.shared.getDiscoveredCameras()
+        log("Scrypted plugin initialized with \(mqttCameras.count) MQTT-discovered cameras")
     }
 
     func shutdown() async {
@@ -1142,7 +1145,7 @@ class ScryptedPlugin: DevicePlugin {
         CredentialManager.shared.store(key: "username", value: u, plugin: identifier)
         CredentialManager.shared.store(key: "password", value: p, plugin: identifier)
         try await authenticate()
-        _ = try await fetchDevices()
+        // MQTT mode - cameras discovered automatically via MQTT. Configure in Settings.
     }
 
     func clearCredentials() {
@@ -1155,8 +1158,20 @@ class ScryptedPlugin: DevicePlugin {
     }
 
     func listDevices() async throws -> [UnifiedDevice] {
-        let devices = try await fetchDevices()
-        return devices.map { $0.toUnified() }
+        // Return MQTT-discovered cameras as devices
+        let mqttCameras = ScryptedMQTTManager.shared.getDiscoveredCameras()
+        return mqttCameras.map { camera in
+            UnifiedDevice(
+                id: camera.id,    // Use Scrypted device ID
+                name: camera.name,  // Friendly name
+                room: nil,
+                type: "camera",
+                source: .scrypted,
+                isReachable: true,
+                manufacturer: "Scrypted",
+                model: "Camera"
+            )
+        }
     }
 
     func getDeviceState(deviceId: String) async throws -> [String: Any] {
@@ -1174,50 +1189,38 @@ class ScryptedPlugin: DevicePlugin {
     // MARK: - Scrypted-Specific Methods
 
     func listCameras() async throws -> [ScryptedCamera] {
-        if let lastFetch = lastFetch, Date().timeIntervalSince(lastFetch) < 60, !cachedCameras.isEmpty {
-            return cachedCameras
+        // Return MQTT-discovered cameras
+        return ScryptedMQTTManager.shared.getDiscoveredCameras().map { camera in
+            ScryptedCamera(
+                id: camera.id,    // Scrypted device ID
+                name: camera.name,  // Friendly name
+                room: nil,
+                hasMotionSensor: true,  // Assume all Scrypted cameras have motion
+                hasAudioDetection: camera.hasObjectDetection,
+                isOnline: true
+            )
         }
-        _ = try await fetchDevices()
-        return cachedCameras
     }
 
     func captureSnapshot(cameraId: String) async throws -> Data {
+        // Scrypted snapshots now use MQTT-discovered cameras and Scrypted REST API
         guard let host = host else { throw PluginError.notConfigured }
 
-        // Try to find the camera by ID or name
-        let camera = cachedCameras.first { $0.id == cameraId || $0.name.lowercased() == cameraId.lowercased() }
-        let deviceId = camera?.id ?? cameraId
-
-        // Try webhook endpoint first (requires webhook plugin installed in Scrypted)
-        // Webhook tokens are stored per device
-        if let webhookToken = getWebhookToken(forDeviceId: deviceId) {
-            let webhookUrl = "\(host)/endpoint/@scrypted/webhook/public/\(deviceId)/\(webhookToken)/takePicture"
-            if let data = try? await fetchSnapshot(from: webhookUrl) {
-                return data
-            }
+        // Find camera by ID or name from MQTT-discovered cameras
+        let mqttCameras = ScryptedMQTTManager.shared.getDiscoveredCameras()
+        let camera = mqttCameras.first {
+            $0.id == cameraId || $0.name.lowercased() == cameraId.lowercased()
         }
 
-        // Try to find webhook token from camera info
-        if let cam = camera, let webhookInfo = cam.webhookInfo {
-            let webhookUrl = "\(host)/endpoint/@scrypted/webhook/public/\(deviceId)/\(webhookInfo)/takePicture"
-            if let data = try? await fetchSnapshot(from: webhookUrl) {
-                return data
-            }
+        guard let foundCamera = camera else {
+            throw PluginError.networkError(NSError(domain: "Scrypted", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Camera '\(cameraId)' not found. Ensure MQTT is connected and the camera is discovered."
+            ]))
         }
 
-        // Fallback: try common Scrypted snapshot endpoints
-        let snapshotUrls = [
-            "\(host)/endpoint/@scrypted/snapshot/public/\(deviceId)",
-            "\(host)/endpoint/@scrypted/core/public/\(deviceId)/snapshot.jpg"
-        ]
-
-        for urlString in snapshotUrls {
-            if let data = try? await fetchSnapshot(from: urlString) {
-                return data
-            }
-        }
-
-        throw PluginError.networkError(NSError(domain: "Scrypted", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not capture snapshot. Ensure webhook plugin is installed in Scrypted and camera has a Camera webhook configured."]))
+        // Use Scrypted REST API for snapshot - use device ID
+        let snapshotUrl = "\(host)/endpoint/@scrypted/core/public/\(foundCamera.id)/takePicture"
+        return try await fetchSnapshot(from: snapshotUrl)
     }
 
     private func fetchSnapshot(from urlString: String) async throws -> Data {
@@ -1247,33 +1250,6 @@ class ScryptedPlugin: DevicePlugin {
         }
 
         return data
-    }
-
-    // Get stored webhook token for a device
-    private func getWebhookToken(forDeviceId deviceId: String) -> String? {
-        // Stored webhook tokens format: "deviceId:token,deviceId:token"
-        guard let tokens = CredentialManager.shared.retrieve(key: "webhookTokens", plugin: identifier) else {
-            return nil
-        }
-        let pairs = tokens.split(separator: ",")
-        for pair in pairs {
-            let parts = pair.split(separator: ":")
-            if parts.count == 2 && String(parts[0]) == deviceId {
-                return String(parts[1])
-            }
-        }
-        return nil
-    }
-
-    // Store a webhook token for a device
-    func setWebhookToken(deviceId: String, token: String) {
-        var tokens = CredentialManager.shared.retrieve(key: "webhookTokens", plugin: identifier) ?? ""
-        // Remove existing entry for this device
-        let pairs = tokens.split(separator: ",").filter { !$0.hasPrefix("\(deviceId):") }
-        var newPairs = pairs.map { String($0) }
-        newPairs.append("\(deviceId):\(token)")
-        tokens = newPairs.joined(separator: ",")
-        CredentialManager.shared.store(key: "webhookTokens", value: tokens, plugin: identifier)
     }
 
     func getMotionState(cameraId: String) async throws -> [String: Any] {
@@ -1342,156 +1318,6 @@ class ScryptedPlugin: DevicePlugin {
         if authToken == nil || (tokenExpiry != nil && Date() > tokenExpiry!) {
             try await authenticate()
         }
-    }
-
-    private func fetchDevices() async throws -> [ScryptedDevice] {
-        if let lastFetch = lastFetch, Date().timeIntervalSince(lastFetch) < 60, !cachedDevices.isEmpty {
-            return cachedDevices
-        }
-
-        try await ensureAuthenticated()
-        guard let host = host else { throw PluginError.notConfigured }
-
-        // Scrypted system state endpoint
-        guard let url = URL(string: "\(host)/endpoint/@scrypted/core/public/state") else {
-            throw PluginError.networkError(NSError(domain: "Scrypted", code: -1))
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let token = authToken, token != "cookie" && token != "basic" {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        if let u = username, let p = password {
-            let credentials = "\(u):\(p)".data(using: .utf8)!.base64EncodedString()
-            request.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
-        }
-
-        let session = createInsecureSession()
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            // Try alternative endpoint
-            return try await fetchDevicesAlternative()
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return try await fetchDevicesAlternative()
-        }
-
-        var devices: [ScryptedDevice] = []
-        var cameras: [ScryptedCamera] = []
-
-        // Parse Scrypted state format
-        for (deviceId, deviceData) in json {
-            guard let info = deviceData as? [String: Any] else { continue }
-
-            let name = info["name"] as? String ?? deviceId
-            let typeArray = info["interfaces"] as? [String] ?? []
-            let room = info["room"] as? String
-
-            let device = ScryptedDevice(
-                id: deviceId,
-                name: name,
-                room: room,
-                interfaces: typeArray,
-                info: info
-            )
-            devices.append(device)
-
-            // Check if it's a camera
-            if typeArray.contains("Camera") || typeArray.contains("VideoCamera") {
-                let hasMotion = typeArray.contains("MotionSensor")
-                let hasAudio = typeArray.contains("Microphone") || typeArray.contains("AudioSensor")
-                cameras.append(ScryptedCamera(
-                    id: deviceId,
-                    name: name,
-                    room: room,
-                    hasMotionSensor: hasMotion,
-                    hasAudioDetection: hasAudio,
-                    isOnline: true,
-                    webhookInfo: nil
-                ))
-            }
-        }
-
-        cachedDevices = devices
-        cachedCameras = cameras
-        lastFetch = Date()
-
-        return devices
-    }
-
-    private func fetchDevicesAlternative() async throws -> [ScryptedDevice] {
-        // Alternative: try to get device list via different endpoint
-        guard let host = host else { throw PluginError.notConfigured }
-
-        guard let url = URL(string: "\(host)/endpoint/@scrypted/core/public/devices") else {
-            throw PluginError.networkError(NSError(domain: "Scrypted", code: -1))
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let u = username, let p = password {
-            let credentials = "\(u):\(p)".data(using: .utf8)!.base64EncodedString()
-            request.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
-        }
-
-        let session = createInsecureSession()
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw PluginError.networkError(NSError(domain: "Scrypted", code: -1))
-        }
-
-        if http.statusCode != 200 {
-            log("Scrypted: Failed to fetch devices (status \(http.statusCode))")
-            // Return empty but don't throw - plugin may still work for configured cameras
-            return []
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return []
-        }
-
-        var devices: [ScryptedDevice] = []
-        var cameras: [ScryptedCamera] = []
-
-        for deviceData in json {
-            let deviceId = deviceData["id"] as? String ?? UUID().uuidString
-            let name = deviceData["name"] as? String ?? deviceId
-            let typeArray = deviceData["interfaces"] as? [String] ?? []
-            let room = deviceData["room"] as? String
-
-            let device = ScryptedDevice(
-                id: deviceId,
-                name: name,
-                room: room,
-                interfaces: typeArray,
-                info: deviceData
-            )
-            devices.append(device)
-
-            if typeArray.contains("Camera") || typeArray.contains("VideoCamera") {
-                let hasMotion = typeArray.contains("MotionSensor")
-                let hasAudio = typeArray.contains("Microphone") || typeArray.contains("AudioSensor")
-                cameras.append(ScryptedCamera(
-                    id: deviceId,
-                    name: name,
-                    room: room,
-                    hasMotionSensor: hasMotion,
-                    hasAudioDetection: hasAudio,
-                    isOnline: true,
-                    webhookInfo: nil
-                ))
-            }
-        }
-
-        cachedDevices = devices
-        cachedCameras = cameras
-        lastFetch = Date()
-
-        return devices
     }
 
     private func fetchDeviceState(deviceId: String) async throws -> [String: Any] {
@@ -1579,7 +1405,6 @@ struct ScryptedCamera {
     let hasMotionSensor: Bool
     let hasAudioDetection: Bool
     let isOnline: Bool
-    var webhookInfo: String?  // Webhook token if available
 }
 
 // URL Session delegate to allow self-signed certificates (common for local Scrypted)
@@ -1591,6 +1416,767 @@ class InsecureURLSessionDelegate: NSObject, URLSessionDelegate {
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
+    }
+}
+
+// MARK: - Lightweight MQTT Client (using Network framework)
+
+/// Minimal MQTT 3.1.1 client for Scrypted integration
+/// No external dependencies - uses Apple's Network framework
+class MQTTClient {
+    enum MQTTError: Error, LocalizedError {
+        case connectionFailed(String)
+        case notConnected
+        case timeout
+        case protocolError(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .connectionFailed(let msg): return "MQTT connection failed: \(msg)"
+            case .notConnected: return "MQTT not connected"
+            case .timeout: return "MQTT connection timeout"
+            case .protocolError(let msg): return "MQTT protocol error: \(msg)"
+            }
+        }
+    }
+
+    enum ConnectionState {
+        case disconnected
+        case connecting
+        case connected
+    }
+
+    // MQTT Packet Types
+    private enum PacketType: UInt8 {
+        case connect = 0x10
+        case connack = 0x20
+        case publish = 0x30
+        case puback = 0x40
+        case subscribe = 0x82
+        case suback = 0x90
+        case pingreq = 0xC0
+        case pingresp = 0xD0
+        case disconnect = 0xE0
+    }
+
+    private var connection: NWConnection?
+    private var state: ConnectionState = .disconnected
+    private let lock = NSLock()
+    private var messageHandler: ((String, Data) -> Void)?
+    private var stateHandler: ((ConnectionState) -> Void)?
+    private var nextPacketId: UInt16 = 1
+    private var pingTimer: Timer?
+    private let queue = DispatchQueue(label: "mqtt.client", qos: .userInitiated)
+
+    var isConnected: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state == .connected
+    }
+
+    func connect(host: String, port: UInt16 = 1883, username: String? = nil, password: String? = nil,
+                 clientId: String = "HomeMCPBridge-\(UUID().uuidString.prefix(8))",
+                 onMessage: @escaping (String, Data) -> Void,
+                 onStateChange: ((ConnectionState) -> Void)? = nil) {
+
+        lock.lock()
+        if state != .disconnected {
+            lock.unlock()
+            return
+        }
+        state = .connecting
+        lock.unlock()
+
+        messageHandler = onMessage
+        stateHandler = onStateChange
+        stateHandler?(.connecting)
+
+        let nwHost = NWEndpoint.Host(host)
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+
+        connection = NWConnection(host: nwHost, port: nwPort, using: .tcp)
+
+        connection?.stateUpdateHandler = { [weak self] newState in
+            guard let self = self else { return }
+            switch newState {
+            case .ready:
+                log("MQTT: TCP connected to \(host):\(port)")
+                self.sendConnect(clientId: clientId, username: username, password: password)
+                self.receiveLoop()
+            case .failed(let error):
+                log("MQTT: Connection failed - \(error.localizedDescription)")
+                self.handleDisconnect()
+            case .cancelled:
+                log("MQTT: Connection cancelled")
+                self.handleDisconnect()
+            default:
+                break
+            }
+        }
+
+        connection?.start(queue: queue)
+
+        // Timeout after 10 seconds
+        queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            if self.state == .connecting {
+                self.lock.unlock()
+                log("MQTT: Connection timeout")
+                self.disconnect()
+            } else {
+                self.lock.unlock()
+            }
+        }
+    }
+
+    func disconnect() {
+        lock.lock()
+        guard state != .disconnected else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        // Send DISCONNECT packet
+        let packet = Data([PacketType.disconnect.rawValue, 0x00])
+        connection?.send(content: packet, completion: .contentProcessed { _ in })
+
+        handleDisconnect()
+    }
+
+    func subscribe(to topics: [String]) {
+        guard isConnected else { return }
+
+        var packet = Data()
+
+        // Fixed header - SUBSCRIBE (0x82)
+        packet.append(PacketType.subscribe.rawValue)
+
+        // Variable header + payload placeholder
+        var variableHeader = Data()
+        let packetId = getNextPacketId()
+        variableHeader.append(UInt8(packetId >> 8))
+        variableHeader.append(UInt8(packetId & 0xFF))
+
+        // Payload - topics with QoS 0
+        var payload = Data()
+        for topic in topics {
+            let topicData = topic.data(using: .utf8) ?? Data()
+            payload.append(UInt8(topicData.count >> 8))
+            payload.append(UInt8(topicData.count & 0xFF))
+            payload.append(topicData)
+            payload.append(0x00) // QoS 0
+        }
+
+        variableHeader.append(payload)
+
+        // Remaining length
+        packet.append(contentsOf: encodeRemainingLength(variableHeader.count))
+        packet.append(variableHeader)
+
+        connection?.send(content: packet, completion: .contentProcessed { error in
+            if let error = error {
+                log("MQTT: Subscribe send error - \(error.localizedDescription)")
+            } else {
+                log("MQTT: Subscribed to \(topics.count) topic(s)")
+            }
+        })
+    }
+
+    // MARK: - Private Methods
+
+    private func sendConnect(clientId: String, username: String?, password: String?) {
+        var packet = Data()
+
+        // Fixed header
+        packet.append(PacketType.connect.rawValue)
+
+        // Variable header
+        var variableHeader = Data()
+
+        // Protocol name "MQTT"
+        variableHeader.append(contentsOf: [0x00, 0x04])
+        variableHeader.append("MQTT".data(using: .utf8)!)
+
+        // Protocol level (4 = MQTT 3.1.1)
+        variableHeader.append(0x04)
+
+        // Connect flags
+        var flags: UInt8 = 0x02 // Clean session
+        if username != nil { flags |= 0x80 }
+        if password != nil { flags |= 0x40 }
+        variableHeader.append(flags)
+
+        // Keep alive (60 seconds)
+        variableHeader.append(contentsOf: [0x00, 0x3C])
+
+        // Payload
+        var payload = Data()
+
+        // Client ID
+        let clientIdData = clientId.data(using: .utf8) ?? Data()
+        payload.append(UInt8(clientIdData.count >> 8))
+        payload.append(UInt8(clientIdData.count & 0xFF))
+        payload.append(clientIdData)
+
+        // Username
+        if let username = username {
+            let userData = username.data(using: .utf8) ?? Data()
+            payload.append(UInt8(userData.count >> 8))
+            payload.append(UInt8(userData.count & 0xFF))
+            payload.append(userData)
+        }
+
+        // Password
+        if let password = password {
+            let passData = password.data(using: .utf8) ?? Data()
+            payload.append(UInt8(passData.count >> 8))
+            payload.append(UInt8(passData.count & 0xFF))
+            payload.append(passData)
+        }
+
+        variableHeader.append(payload)
+
+        // Remaining length
+        packet.append(contentsOf: encodeRemainingLength(variableHeader.count))
+        packet.append(variableHeader)
+
+        connection?.send(content: packet, completion: .contentProcessed { error in
+            if let error = error {
+                log("MQTT: Connect send error - \(error.localizedDescription)")
+            }
+        })
+    }
+
+    private func receiveLoop() {
+        connection?.receive(minimumIncompleteLength: 2, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                log("MQTT: Receive error - \(error.localizedDescription)")
+                self.handleDisconnect()
+                return
+            }
+
+            if let data = content, !data.isEmpty {
+                self.processPacket(data)
+            }
+
+            if isComplete {
+                self.handleDisconnect()
+            } else if self.isConnected || self.state == .connecting {
+                self.receiveLoop()
+            }
+        }
+    }
+
+    private func processPacket(_ data: Data) {
+        guard data.count >= 2 else { return }
+
+        let packetType = data[0] & 0xF0
+
+        switch packetType {
+        case PacketType.connack.rawValue:
+            handleConnack(data)
+        case PacketType.publish.rawValue:
+            handlePublish(data)
+        case PacketType.suback.rawValue:
+            log("MQTT: SUBACK received")
+        case PacketType.pingresp.rawValue:
+            // Ping response received
+            break
+        default:
+            break
+        }
+    }
+
+    private func handleConnack(_ data: Data) {
+        guard data.count >= 4 else { return }
+
+        let returnCode = data[3]
+        if returnCode == 0 {
+            lock.lock()
+            state = .connected
+            lock.unlock()
+
+            log("MQTT: Connected successfully")
+            stateHandler?(.connected)
+
+            // Start ping timer
+            DispatchQueue.main.async { [weak self] in
+                self?.pingTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                    self?.sendPing()
+                }
+            }
+        } else {
+            let errorMsg: String
+            switch returnCode {
+            case 1: errorMsg = "Unacceptable protocol version"
+            case 2: errorMsg = "Identifier rejected"
+            case 3: errorMsg = "Server unavailable"
+            case 4: errorMsg = "Bad username or password"
+            case 5: errorMsg = "Not authorized"
+            default: errorMsg = "Unknown error (\(returnCode))"
+            }
+            log("MQTT: Connection refused - \(errorMsg)")
+            handleDisconnect()
+        }
+    }
+
+    private func handlePublish(_ data: Data) {
+        guard data.count >= 4 else { return }
+
+        // Decode remaining length
+        var index = 1
+        var remainingLength = 0
+        var multiplier = 1
+        while index < data.count {
+            let byte = Int(data[index])
+            remainingLength += (byte & 127) * multiplier
+            multiplier *= 128
+            index += 1
+            if byte & 128 == 0 { break }
+        }
+
+        guard index + 2 <= data.count else { return }
+
+        // Topic length
+        let topicLength = Int(data[index]) << 8 | Int(data[index + 1])
+        index += 2
+
+        guard index + topicLength <= data.count else { return }
+
+        // Topic
+        let topicData = data[index..<(index + topicLength)]
+        guard let topic = String(data: topicData, encoding: .utf8) else { return }
+        index += topicLength
+
+        // QoS check (bits 1-2 of first byte)
+        let qos = (data[0] & 0x06) >> 1
+        if qos > 0 && index + 2 <= data.count {
+            // Skip packet ID for QoS > 0
+            index += 2
+        }
+
+        // Payload
+        let payload = data[index...]
+
+        messageHandler?(topic, Data(payload))
+    }
+
+    private func sendPing() {
+        guard isConnected else { return }
+        let packet = Data([PacketType.pingreq.rawValue, 0x00])
+        connection?.send(content: packet, completion: .contentProcessed { _ in })
+    }
+
+    private func handleDisconnect() {
+        pingTimer?.invalidate()
+        pingTimer = nil
+
+        connection?.cancel()
+        connection = nil
+
+        lock.lock()
+        state = .disconnected
+        lock.unlock()
+
+        stateHandler?(.disconnected)
+    }
+
+    private func getNextPacketId() -> UInt16 {
+        lock.lock()
+        defer { lock.unlock() }
+        let id = nextPacketId
+        nextPacketId = nextPacketId == UInt16.max ? 1 : nextPacketId + 1
+        return id
+    }
+
+    private func encodeRemainingLength(_ length: Int) -> [UInt8] {
+        var bytes: [UInt8] = []
+        var x = length
+        repeat {
+            var byte = UInt8(x % 128)
+            x /= 128
+            if x > 0 { byte |= 128 }
+            bytes.append(byte)
+        } while x > 0
+        return bytes
+    }
+}
+
+// MARK: - Scrypted MQTT Manager
+
+/// Manages MQTT connection to Scrypted for real-time events and auto-discovery
+class ScryptedMQTTManager {
+    static let shared = ScryptedMQTTManager()
+
+    private let mqttClient = MQTTClient()
+    private let defaults = UserDefaults.standard
+    private let lock = NSLock()
+
+    // Settings keys
+    private let hostKey = "scrypted.mqtt.host"
+    private let portKey = "scrypted.mqtt.port"
+    private let usernameKey = "scrypted.mqtt.username"
+    private let passwordKey = "scrypted.mqtt.password"
+    private let enabledKey = "scrypted.mqtt.enabled"
+
+    // Discovered devices
+    private var discoveredCameras: [String: ScryptedMQTTCamera] = [:]  // keyed by device ID
+    private var discoveredSensors: [String: ScryptedMQTTSensor] = [:]
+    private var deviceNameMap: [String: String] = [:]  // device ID -> friendly name
+
+    struct ScryptedMQTTCamera {
+        let id: String              // Scrypted device ID
+        var name: String            // Friendly name (defaults to ID)
+        var motionDetected: Bool = false
+        var lastMotionTime: Date?
+        var hasObjectDetection: Bool = false
+        var lastDetections: [String] = []  // e.g., ["person", "car"]
+    }
+
+    struct ScryptedMQTTSensor {
+        let name: String
+        let type: String  // "motion", "doorbell", "contact"
+        var state: Bool = false
+        var lastEventTime: Date?
+    }
+
+    var isEnabled: Bool {
+        get { defaults.bool(forKey: enabledKey) }
+        set { defaults.set(newValue, forKey: enabledKey) }
+    }
+
+    var host: String? {
+        get { defaults.string(forKey: hostKey) }
+        set { defaults.set(newValue, forKey: hostKey) }
+    }
+
+    var port: Int {
+        get { defaults.integer(forKey: portKey).nonZeroOr(1883) }
+        set { defaults.set(newValue, forKey: portKey) }
+    }
+
+    var username: String? {
+        get { CredentialManager.shared.retrieve(key: "mqtt_username", plugin: "scrypted") }
+        set {
+            if let value = newValue {
+                CredentialManager.shared.store(key: "mqtt_username", value: value, plugin: "scrypted")
+            } else {
+                CredentialManager.shared.delete(key: "mqtt_username", plugin: "scrypted")
+            }
+        }
+    }
+
+    var password: String? {
+        get { CredentialManager.shared.retrieve(key: "mqtt_password", plugin: "scrypted") }
+        set {
+            if let value = newValue {
+                CredentialManager.shared.store(key: "mqtt_password", value: value, plugin: "scrypted")
+            } else {
+                CredentialManager.shared.delete(key: "mqtt_password", plugin: "scrypted")
+            }
+        }
+    }
+
+    var isConfigured: Bool {
+        guard let h = host, !h.isEmpty else { return false }
+        return true
+    }
+
+    var isConnected: Bool {
+        mqttClient.isConnected
+    }
+
+    func connect() {
+        guard isEnabled, isConfigured, let host = host else {
+            log("MQTT: Not configured or disabled")
+            return
+        }
+
+        guard !isConnected else {
+            log("MQTT: Already connected")
+            return
+        }
+
+        log("MQTT: Connecting to \(host):\(port)...")
+
+        mqttClient.connect(
+            host: host,
+            port: UInt16(port),
+            username: username,
+            password: password,
+            onMessage: { [weak self] topic, payload in
+                self?.handleMessage(topic: topic, payload: payload)
+            },
+            onStateChange: { [weak self] state in
+                switch state {
+                case .connected:
+                    self?.onConnected()
+                case .disconnected:
+                    log("MQTT: Disconnected")
+                case .connecting:
+                    break
+                }
+            }
+        )
+    }
+
+    func disconnect() {
+        mqttClient.disconnect()
+    }
+
+    func getDiscoveredCameras() -> [ScryptedMQTTCamera] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(discoveredCameras.values)
+    }
+
+    func getDiscoveredSensors() -> [ScryptedMQTTSensor] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(discoveredSensors.values)
+    }
+
+    // MARK: - Private Methods
+
+    private func onConnected() {
+        log("MQTT: Connected, subscribing to Scrypted topics...")
+
+        // Subscribe to ALL Scrypted device topics with wildcard
+        // Topic format: scrypted/<device-id>/<property>
+        // Using # wildcard to catch all properties and discover cameras automatically
+        mqttClient.subscribe(to: [
+            "scrypted/#",                      // All Scrypted topics (for discovery)
+            "homeassistant/+/+/config"         // Home Assistant auto-discovery (if enabled)
+        ])
+    }
+
+    private func handleMessage(topic: String, payload: Data) {
+        let parts = topic.split(separator: "/")
+        guard parts.count >= 2, parts[0] == "scrypted" else {
+            // Handle Home Assistant discovery format
+            if parts.count >= 4 && parts[0] == "homeassistant" {
+                handleHomeAssistantDiscovery(topic: topic, payload: payload)
+            }
+            return
+        }
+
+        let deviceId = String(parts[1])
+        let property = parts.count >= 3 ? String(parts[2]) : ""
+
+        // Auto-discover any device that publishes to scrypted/<id>/...
+        // If it has motionDetected, it's likely a camera
+        autoDiscoverDevice(deviceId: deviceId, property: property, payload: payload)
+
+        switch property {
+        case "motionDetected":
+            handleMotionDetected(device: deviceId, payload: payload)
+        case "ObjectDetector":
+            handleObjectDetection(device: deviceId, payload: payload)
+        case "binaryState":
+            handleBinaryState(device: deviceId, payload: payload)
+        case "online":
+            handleOnlineState(device: deviceId, payload: payload)
+        case "name":
+            handleDeviceName(device: deviceId, payload: payload)
+        case "interfaces":
+            handleDeviceInterfaces(device: deviceId, payload: payload)
+        default:
+            break
+        }
+    }
+
+    private func autoDiscoverDevice(deviceId: String, property: String, payload: Data) {
+        // Camera-related properties that indicate this is a camera
+        let cameraProperties = ["motionDetected", "ObjectDetector", "recording", "recordingActive",
+                                "picture", "pictureUrl", "videoStreamUrl", "interfaces"]
+
+        // If device ID looks like a number (Scrypted uses numeric IDs) and we see camera-like properties
+        if let _ = Int(deviceId), cameraProperties.contains(property) {
+            lock.lock()
+            if discoveredCameras[deviceId] == nil {
+                let friendlyName = deviceNameMap[deviceId] ?? deviceId
+                discoveredCameras[deviceId] = ScryptedMQTTCamera(id: deviceId, name: friendlyName)
+                log("MQTT: Auto-discovered camera \(deviceId) via \(property)")
+            }
+            lock.unlock()
+        }
+    }
+
+    private func handleDeviceName(device: String, payload: Data) {
+        guard let name = String(data: payload, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else { return }
+
+        lock.lock()
+        deviceNameMap[device] = name
+        // Update camera name if already discovered
+        if discoveredCameras[device] != nil {
+            discoveredCameras[device]?.name = name
+            log("MQTT: Updated camera \(device) name to '\(name)'")
+        }
+        lock.unlock()
+    }
+
+    private func handleDeviceInterfaces(device: String, payload: Data) {
+        // Interfaces can be JSON array like ["Camera", "MotionSensor", "VideoCamera"]
+        // or comma-separated string
+        let payloadStr = String(data: payload, encoding: .utf8) ?? ""
+
+        var interfaces: [String] = []
+        if let json = try? JSONSerialization.jsonObject(with: payload) as? [String] {
+            interfaces = json
+        } else {
+            interfaces = payloadStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+
+        // If it's a camera, auto-discover it
+        let isCamera = interfaces.contains { $0.lowercased().contains("camera") || $0.lowercased().contains("video") }
+        if isCamera {
+            lock.lock()
+            if discoveredCameras[device] == nil {
+                let friendlyName = deviceNameMap[device] ?? device
+                discoveredCameras[device] = ScryptedMQTTCamera(id: device, name: friendlyName)
+                log("MQTT: Discovered camera \(device) (\(friendlyName)) via interfaces")
+            }
+            lock.unlock()
+        }
+    }
+
+    private func handleMotionDetected(device: String, payload: Data) {
+        let payloadStr = String(data: payload, encoding: .utf8) ?? ""
+        let detected = payloadStr == "true" || payloadStr == "1" || payloadStr == "ON"
+
+        lock.lock()
+        if discoveredCameras[device] == nil {
+            let friendlyName = deviceNameMap[device] ?? device
+            discoveredCameras[device] = ScryptedMQTTCamera(id: device, name: friendlyName)
+        }
+        discoveredCameras[device]?.motionDetected = detected
+        if detected {
+            discoveredCameras[device]?.lastMotionTime = Date()
+        }
+        let cameraName = discoveredCameras[device]?.name ?? device
+        lock.unlock()
+
+        log("MQTT: \(cameraName) motion \(detected ? "DETECTED" : "cleared")")
+
+        // Post to event system
+        postMotionEvent(device: device, detected: detected, type: "motion")
+    }
+
+    private func handleObjectDetection(device: String, payload: Data) {
+        // Payload format: {"detections":[{"className":"person","score":0.85,...}]}
+        guard let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let detections = json["detections"] as? [[String: Any]] else {
+            return
+        }
+
+        let classNames = detections.compactMap { $0["className"] as? String }
+        guard !classNames.isEmpty else { return }
+
+        lock.lock()
+        if discoveredCameras[device] == nil {
+            let friendlyName = deviceNameMap[device] ?? device
+            discoveredCameras[device] = ScryptedMQTTCamera(id: device, name: friendlyName)
+        }
+        discoveredCameras[device]?.hasObjectDetection = true
+        discoveredCameras[device]?.lastDetections = classNames
+        discoveredCameras[device]?.lastMotionTime = Date()
+        let cameraName = discoveredCameras[device]?.name ?? device
+        lock.unlock()
+
+        log("MQTT: \(cameraName) detected: \(classNames.joined(separator: ", "))")
+
+        // Post event with detection details
+        for className in classNames {
+            postMotionEvent(device: device, detected: true, type: "object_\(className)")
+        }
+    }
+
+    private func handleBinaryState(device: String, payload: Data) {
+        let payloadStr = String(data: payload, encoding: .utf8) ?? ""
+        let state = payloadStr == "true" || payloadStr == "1" || payloadStr == "ON"
+
+        lock.lock()
+        // Could be a contact sensor or doorbell
+        if discoveredSensors[device] == nil {
+            discoveredSensors[device] = ScryptedMQTTSensor(name: device, type: "contact")
+        }
+        discoveredSensors[device]?.state = state
+        discoveredSensors[device]?.lastEventTime = Date()
+        lock.unlock()
+
+        log("MQTT: \(device) binary state: \(state)")
+
+        postMotionEvent(device: device, detected: state, type: "contact")
+    }
+
+    private func handleOnlineState(device: String, payload: Data) {
+        // Just log for now - could track device availability
+        let payloadStr = String(data: payload, encoding: .utf8) ?? ""
+        let online = payloadStr == "true" || payloadStr == "1"
+        log("MQTT: \(device) online: \(online)")
+    }
+
+    private func handleHomeAssistantDiscovery(topic: String, payload: Data) {
+        // Home Assistant MQTT discovery format
+        // homeassistant/<component>/<node_id>/config
+        guard let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let name = json["name"] as? String else {
+            return
+        }
+
+        log("MQTT: HA Discovery - \(name)")
+
+        // Auto-register discovered devices
+        lock.lock()
+        if topic.contains("/camera/") || topic.contains("/image/") {
+            if discoveredCameras[name] == nil {
+                discoveredCameras[name] = ScryptedMQTTCamera(id: name, name: name)
+            }
+        } else if topic.contains("/binary_sensor/") {
+            if discoveredSensors[name] == nil {
+                let type = topic.contains("motion") ? "motion" : "contact"
+                discoveredSensors[name] = ScryptedMQTTSensor(name: name, type: type)
+            }
+        }
+        lock.unlock()
+    }
+
+    private func postMotionEvent(device: String, detected: Bool, type: String) {
+        // Create event and add to MotionSensorManager buffer
+        let event = MotionSensorManager.MotionEvent(
+            id: UUID().uuidString,
+            sensorName: device,
+            sensorId: "scrypted-\(device.lowercased().replacingOccurrences(of: " ", with: "-"))",
+            room: "Scrypted",
+            home: "Scrypted",
+            eventType: type,
+            detected: detected,
+            timestamp: Date()
+        )
+
+        MotionSensorManager.shared.addExternalEvent(event)
+
+        // Also post to MCPPost if enabled
+        MCPPostManager.shared.postMotionEvent(
+            sensorName: device,
+            sensorId: event.sensorId,
+            room: "Scrypted",
+            home: "Scrypted",
+            eventType: type,
+            detected: detected
+        )
+    }
+}
+
+// Helper extension
+private extension Int {
+    func nonZeroOr(_ defaultValue: Int) -> Int {
+        self != 0 ? self : defaultValue
     }
 }
 
@@ -1882,6 +2468,14 @@ class MotionSensorManager: NSObject, HMAccessoryDelegate {
     func clearEvents() {
         lock.lock()
         eventBuffer.removeAll()
+        lock.unlock()
+    }
+
+    /// Add an event from external sources (like MQTT)
+    func addExternalEvent(_ event: MotionEvent) {
+        lock.lock()
+        eventBuffer.append(event)
+        if eventBuffer.count > maxEvents { eventBuffer.removeFirst() }
         lock.unlock()
     }
 
@@ -2515,18 +3109,6 @@ class MCPServer {
                 ],
                 "required": []
             ]
-        ],
-        [
-            "name": "scrypted_set_webhook_token",
-            "description": "Set the webhook token for a Scrypted camera. This enables snapshot capture via the Scrypted Webhook plugin.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "device_id": ["type": "string", "description": "The Scrypted device ID"],
-                    "token": ["type": "string", "description": "The webhook token from Scrypted (found in webhook URL)"]
-                ],
-                "required": ["device_id", "token"]
-            ]
         ]
     ]
 
@@ -2917,30 +3499,6 @@ class MCPServer {
             _ = semaphore.wait(timeout: .now() + 15)
             log("  -> Scrypted camera state for '\(finalCameraId)'")
             respondToolResult(id: id, result: result)
-
-        case "scrypted_set_webhook_token":
-            guard let scryptedPlugin = PluginManager.shared.plugin(withId: "scrypted") as? ScryptedPlugin else {
-                respondToolResult(id: id, result: ["error": "Scrypted plugin not available", "success": false])
-                return
-            }
-
-            guard let deviceId = arguments["device_id"] as? String, !deviceId.isEmpty else {
-                respondToolResult(id: id, result: ["error": "device_id is required", "success": false])
-                return
-            }
-
-            guard let token = arguments["token"] as? String, !token.isEmpty else {
-                respondToolResult(id: id, result: ["error": "token is required", "success": false])
-                return
-            }
-
-            scryptedPlugin.setWebhookToken(deviceId: deviceId, token: token)
-            log("  -> Set webhook token for device '\(deviceId)'")
-            respondToolResult(id: id, result: [
-                "success": true,
-                "message": "Webhook token set for device \(deviceId)",
-                "device_id": deviceId
-            ])
 
         default:
             respondToolResult(id: id, result: ["error": "Unknown tool: \(name)"])
@@ -3516,13 +4074,15 @@ class SetupViewController: UIViewController {
 1. Install and configure Scrypted on your network
 2. Note your Scrypted server URL (e.g., https://mac-mini.local:10443)
 3. Create an admin user in Scrypted if you haven't already
-4. Install the @scrypted/webhook plugin in Scrypted for camera snapshots
-5. For each camera you want snapshots from:
-   - Go to the camera's Settings > Webhook
-   - Create a new Camera webhook
-   - Copy the webhook token from the URL
-6. Enter host, username, password in the Plugins tab
-7. Use scrypted_set_webhook_token tool to configure each camera's token
+4. Install the @scrypted/mqtt plugin in Scrypted
+5. Enable the built-in MQTT Broker in the MQTT plugin settings
+6. Enable MQTT on each camera you want to discover
+7. Go to Settings tab and configure Scrypted MQTT:
+   - Host: mac-mini.local (your Scrypted server)
+   - Port: 1883 (default MQTT port)
+   - Enable the connection
+
+Cameras are automatically discovered via MQTT - no manual configuration needed per camera!
 """
         let scryptedDesc = createDescription(scryptedSteps)
         contentView.addSubview(scryptedDesc)
@@ -3762,40 +4322,200 @@ class LogViewController: UIViewController {
     }
 }
 
-// MARK: - Main Tab Controller
+// MARK: - Main Split Controller (Finder-style sidebar)
 
-class MainTabController: UITabBarController {
+class MainSplitController: UISplitViewController, UISplitViewControllerDelegate {
+
+    enum SidebarItem: String, CaseIterable {
+        case status = "Status"
+        case devices = "Devices"
+        case plugins = "Plugins"
+        case mcpPost = "MCPPost"
+        case settings = "Settings"
+        case log = "Log"
+
+        var icon: UIImage? {
+            switch self {
+            case .status: return UIImage(systemName: "house.fill")
+            case .devices: return UIImage(systemName: "lightbulb.fill")
+            case .plugins: return UIImage(systemName: "puzzlepiece.extension.fill")
+            case .mcpPost: return UIImage(systemName: "arrow.up.circle.fill")
+            case .settings: return UIImage(systemName: "gearshape.fill")
+            case .log: return UIImage(systemName: "doc.text.fill")
+            }
+        }
+    }
+
+    private var sidebarViewController: SidebarViewController!
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        // Configure split view style
+        preferredDisplayMode = .oneBesideSecondary
+        presentsWithGesture = false
+        delegate = self
+
+        // Primary minimum width (sidebar)
+        preferredPrimaryColumnWidthFraction = 0.25
+        minimumPrimaryColumnWidth = 180
+        maximumPrimaryColumnWidth = 250
+
+        // Create sidebar
+        sidebarViewController = SidebarViewController()
+        sidebarViewController.delegate = self
+
+        // Create initial detail view
         let statusVC = StatusViewController()
-        statusVC.tabBarItem = UITabBarItem(title: "Status", image: UIImage(systemName: "house"), tag: 0)
+        let detailNav = UINavigationController(rootViewController: statusVC)
 
-        let devicesVC = DevicesViewController()
-        devicesVC.tabBarItem = UITabBarItem(title: "Devices", image: UIImage(systemName: "lightbulb"), tag: 1)
+        // Set view controllers
+        viewControllers = [sidebarViewController, detailNav]
+    }
 
-        let pluginsVC = PluginsViewController()
-        pluginsVC.tabBarItem = UITabBarItem(title: "Plugins", image: UIImage(systemName: "puzzlepiece"), tag: 2)
+    func splitViewController(_ svc: UISplitViewController, topColumnForCollapsingToProposedTopColumn proposedTopColumn: UISplitViewController.Column) -> UISplitViewController.Column {
+        return .primary
+    }
 
-        let mcpPostVC = MCPPostViewController()
-        mcpPostVC.tabBarItem = UITabBarItem(title: "MCPPost", image: UIImage(systemName: "arrow.up.circle"), tag: 3)
+    // Select a sidebar item programmatically
+    func selectItem(_ item: SidebarItem) {
+        sidebarViewController.selectItem(item)
+        sidebarDidSelect(item: item)
+    }
 
-        let setupVC = SetupViewController()
-        setupVC.tabBarItem = UITabBarItem(title: "Setup", image: UIImage(systemName: "gearshape"), tag: 4)
-
-        let logVC = LogViewController()
-        logVC.tabBarItem = UITabBarItem(title: "Log", image: UIImage(systemName: "doc.text"), tag: 5)
-
-        viewControllers = [
-            UINavigationController(rootViewController: statusVC),
-            UINavigationController(rootViewController: devicesVC),
-            UINavigationController(rootViewController: pluginsVC),
-            UINavigationController(rootViewController: mcpPostVC),
-            UINavigationController(rootViewController: setupVC),
-            UINavigationController(rootViewController: logVC)
-        ]
+    // Compatibility property for old tab-based code
+    var selectedIndex: Int {
+        get { sidebarViewController.selectedIndex }
+        set {
+            let items = SidebarItem.allCases
+            if newValue >= 0 && newValue < items.count {
+                selectItem(items[newValue])
+            }
+        }
     }
 }
+
+extension MainSplitController: SidebarViewControllerDelegate {
+    func sidebarDidSelect(item: MainSplitController.SidebarItem) {
+        let viewController: UIViewController
+
+        switch item {
+        case .status:
+            viewController = StatusViewController()
+        case .devices:
+            viewController = DevicesViewController()
+        case .plugins:
+            viewController = PluginsViewController()
+        case .mcpPost:
+            viewController = MCPPostViewController()
+        case .settings:
+            viewController = SetupViewController()
+        case .log:
+            viewController = LogViewController()
+        }
+
+        let detailNav = UINavigationController(rootViewController: viewController)
+        showDetailViewController(detailNav, sender: self)
+    }
+}
+
+protocol SidebarViewControllerDelegate: AnyObject {
+    func sidebarDidSelect(item: MainSplitController.SidebarItem)
+}
+
+class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
+    weak var delegate: SidebarViewControllerDelegate?
+
+    private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+    private let items = MainSplitController.SidebarItem.allCases
+    var selectedIndex: Int = 0
+
+    func selectItem(_ item: MainSplitController.SidebarItem) {
+        guard let index = items.firstIndex(of: item) else { return }
+        let indexPath = IndexPath(row: index, section: 0)
+        tableView(tableView, didSelectRowAt: indexPath)
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        title = "HomeMCPBridge"
+        navigationController?.navigationBar.prefersLargeTitles = false
+
+        view.backgroundColor = .systemGroupedBackground
+
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "SidebarCell")
+        tableView.translatesAutoresizingMaskIntoConstraints = false
+        tableView.backgroundColor = .clear
+        tableView.separatorStyle = .none
+
+        view.addSubview(tableView)
+        NSLayoutConstraint.activate([
+            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+
+        // Select first item by default
+        tableView.selectRow(at: IndexPath(row: 0, section: 0), animated: false, scrollPosition: .none)
+    }
+
+    func numberOfSections(in tableView: UITableView) -> Int { 1 }
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        items.count
+    }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "SidebarCell", for: indexPath)
+        let item = items[indexPath.row]
+
+        var config = cell.defaultContentConfiguration()
+        config.text = item.rawValue
+        config.image = item.icon
+        config.imageProperties.tintColor = indexPath.row == selectedIndex ? .white : .systemBlue
+
+        if indexPath.row == selectedIndex {
+            config.textProperties.color = .white
+            cell.backgroundColor = .systemBlue
+            cell.layer.cornerRadius = 8
+            cell.layer.masksToBounds = true
+        } else {
+            config.textProperties.color = .label
+            cell.backgroundColor = .clear
+            cell.layer.cornerRadius = 0
+        }
+
+        cell.contentConfiguration = config
+        cell.selectionStyle = .none
+
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        let previousIndex = selectedIndex
+        selectedIndex = indexPath.row
+
+        // Reload affected cells to update selection appearance
+        var indexPaths = [indexPath]
+        if previousIndex != selectedIndex {
+            indexPaths.append(IndexPath(row: previousIndex, section: 0))
+        }
+        tableView.reloadRows(at: indexPaths, with: .none)
+
+        delegate?.sidebarDidSelect(item: items[indexPath.row])
+    }
+
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        44
+    }
+}
+
+// Legacy alias for compatibility
+typealias MainTabController = MainSplitController
 
 // MARK: - Plugins View Controller
 
@@ -3876,8 +4596,14 @@ class PluginsViewController: UITableViewController {
             return
         }
 
-        let configVC = PluginConfigViewController(plugin: plugin)
-        navigationController?.pushViewController(configVC, animated: true)
+        // Use specialized config for Scrypted (includes MQTT settings)
+        if plugin.identifier == "scrypted" {
+            let configVC = ScryptedConfigViewController()
+            navigationController?.pushViewController(configVC, animated: true)
+        } else {
+            let configVC = PluginConfigViewController(plugin: plugin)
+            navigationController?.pushViewController(configVC, animated: true)
+        }
     }
 
     @objc private func togglePlugin(_ sender: UISwitch) {
@@ -4051,12 +4777,383 @@ class PluginConfigViewController: UITableViewController {
     }
 }
 
+// MARK: - Scrypted Config View Controller (with MQTT)
+
+/// Specialized configuration view for Scrypted with MQTT integration
+/// Provides a simple, user-friendly setup experience
+class ScryptedConfigViewController: UITableViewController {
+    private enum Section: Int, CaseIterable {
+        case mqttConnection = 0
+        case mqttStatus
+        case actions
+    }
+
+    private var mqttHostField: UITextField!
+    private var mqttPortField: UITextField!
+    private var mqttUsernameField: UITextField!
+    private var mqttPasswordField: UITextField!
+    private var mqttEnabledSwitch: UISwitch!
+
+    override init(style: UITableView.Style = .insetGrouped) {
+        super.init(style: style)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Scrypted NVR"
+
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Save", style: .done, target: self, action: #selector(save))
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int {
+        Section.allCases.count
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        switch Section(rawValue: section)! {
+        case .mqttConnection: return 5  // Enable, Host, Port, Username, Password
+        case .mqttStatus: return 1
+        case .actions: return 2  // Test Connection, Clear Settings
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        switch Section(rawValue: section)! {
+        case .mqttConnection: return "MQTT Connection (Recommended)"
+        case .mqttStatus: return "Status"
+        case .actions: return "Actions"
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
+        switch Section(rawValue: section)! {
+        case .mqttConnection:
+            return "MQTT provides real-time events from all Scrypted cameras and sensors automatically. Install the MQTT plugin in Scrypted, then enter your MQTT broker details here."
+        case .mqttStatus:
+            return nil
+        case .actions:
+            return nil
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        switch Section(rawValue: indexPath.section)! {
+        case .mqttConnection:
+            return createConnectionCell(for: indexPath.row)
+        case .mqttStatus:
+            return createStatusCell()
+        case .actions:
+            return createActionCell(for: indexPath.row)
+        }
+    }
+
+    private func createConnectionCell(for row: Int) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        cell.selectionStyle = .none
+
+        switch row {
+        case 0: // Enable MQTT
+            var config = cell.defaultContentConfiguration()
+            config.text = "Enable MQTT"
+            cell.contentConfiguration = config
+
+            mqttEnabledSwitch = UISwitch()
+            mqttEnabledSwitch.isOn = ScryptedMQTTManager.shared.isEnabled
+            mqttEnabledSwitch.addTarget(self, action: #selector(mqttToggled), for: .valueChanged)
+            cell.accessoryView = mqttEnabledSwitch
+
+        case 1: // Host
+            let (label, textField) = createLabeledTextField(
+                label: "MQTT Host",
+                placeholder: "192.168.1.100",
+                text: ScryptedMQTTManager.shared.host ?? ""
+            )
+            mqttHostField = textField
+            cell.contentView.addSubview(label)
+            cell.contentView.addSubview(textField)
+            setupLabeledTextFieldConstraints(label: label, textField: textField, in: cell)
+
+        case 2: // Port
+            let (label, textField) = createLabeledTextField(
+                label: "Port",
+                placeholder: "1883",
+                text: String(ScryptedMQTTManager.shared.port)
+            )
+            textField.keyboardType = .numberPad
+            mqttPortField = textField
+            cell.contentView.addSubview(label)
+            cell.contentView.addSubview(textField)
+            setupLabeledTextFieldConstraints(label: label, textField: textField, in: cell)
+
+        case 3: // Username
+            let (label, textField) = createLabeledTextField(
+                label: "Username",
+                placeholder: "Optional",
+                text: ScryptedMQTTManager.shared.username ?? ""
+            )
+            mqttUsernameField = textField
+            cell.contentView.addSubview(label)
+            cell.contentView.addSubview(textField)
+            setupLabeledTextFieldConstraints(label: label, textField: textField, in: cell)
+
+        case 4: // Password
+            let (label, textField) = createLabeledTextField(
+                label: "Password",
+                placeholder: "Optional",
+                text: ScryptedMQTTManager.shared.password ?? "",
+                isSecure: true
+            )
+            mqttPasswordField = textField
+            cell.contentView.addSubview(label)
+            cell.contentView.addSubview(textField)
+            setupLabeledTextFieldConstraints(label: label, textField: textField, in: cell)
+
+        default:
+            break
+        }
+
+        return cell
+    }
+
+    private func createStatusCell() -> UITableViewCell {
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+        cell.selectionStyle = .none
+
+        var config = cell.defaultContentConfiguration()
+
+        if ScryptedMQTTManager.shared.isConnected {
+            config.text = "Connected"
+            config.textProperties.color = .systemGreen
+            config.image = UIImage(systemName: "checkmark.circle.fill")
+            config.imageProperties.tintColor = .systemGreen
+
+            let cameras = ScryptedMQTTManager.shared.getDiscoveredCameras()
+            let sensors = ScryptedMQTTManager.shared.getDiscoveredSensors()
+            config.secondaryText = "\(cameras.count) cameras, \(sensors.count) sensors discovered"
+        } else if ScryptedMQTTManager.shared.isEnabled && ScryptedMQTTManager.shared.isConfigured {
+            config.text = "Disconnected"
+            config.textProperties.color = .systemOrange
+            config.image = UIImage(systemName: "exclamationmark.circle.fill")
+            config.imageProperties.tintColor = .systemOrange
+            config.secondaryText = "Tap 'Test Connection' to connect"
+        } else if !ScryptedMQTTManager.shared.isConfigured {
+            config.text = "Not Configured"
+            config.textProperties.color = .secondaryLabel
+            config.image = UIImage(systemName: "circle")
+            config.imageProperties.tintColor = .secondaryLabel
+            config.secondaryText = "Enter MQTT host to get started"
+        } else {
+            config.text = "Disabled"
+            config.textProperties.color = .secondaryLabel
+            config.image = UIImage(systemName: "circle")
+            config.imageProperties.tintColor = .secondaryLabel
+            config.secondaryText = "Enable MQTT to receive events"
+        }
+
+        cell.contentConfiguration = config
+        return cell
+    }
+
+    private func createActionCell(for row: Int) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        var config = cell.defaultContentConfiguration()
+        config.textProperties.alignment = .center
+
+        if row == 0 {
+            config.text = "Test Connection"
+            config.textProperties.color = .systemBlue
+        } else {
+            config.text = "Clear Settings"
+            config.textProperties.color = .systemRed
+        }
+
+        cell.contentConfiguration = config
+        return cell
+    }
+
+    private func createLabeledTextField(label: String, placeholder: String, text: String, isSecure: Bool = false) -> (UILabel, UITextField) {
+        let labelView = UILabel()
+        labelView.text = label
+        labelView.font = .systemFont(ofSize: 15)
+        labelView.translatesAutoresizingMaskIntoConstraints = false
+
+        let textField = UITextField()
+        textField.placeholder = placeholder
+        textField.text = text
+        textField.isSecureTextEntry = isSecure
+        textField.autocapitalizationType = .none
+        textField.autocorrectionType = .no
+        textField.textAlignment = .right
+        textField.font = .systemFont(ofSize: 15)
+        textField.translatesAutoresizingMaskIntoConstraints = false
+
+        return (labelView, textField)
+    }
+
+    private func setupLabeledTextFieldConstraints(label: UILabel, textField: UITextField, in cell: UITableViewCell) {
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 16),
+            label.centerYAnchor.constraint(equalTo: cell.contentView.centerYAnchor),
+            label.widthAnchor.constraint(equalToConstant: 100),
+
+            textField.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 8),
+            textField.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor, constant: -16),
+            textField.centerYAnchor.constraint(equalTo: cell.contentView.centerYAnchor),
+            textField.heightAnchor.constraint(equalToConstant: 44)
+        ])
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+
+        guard indexPath.section == Section.actions.rawValue else { return }
+
+        if indexPath.row == 0 {
+            testConnection()
+        } else {
+            clearSettings()
+        }
+    }
+
+    @objc private func mqttToggled(_ sender: UISwitch) {
+        ScryptedMQTTManager.shared.isEnabled = sender.isOn
+        if sender.isOn && ScryptedMQTTManager.shared.isConfigured {
+            ScryptedMQTTManager.shared.connect()
+        } else if !sender.isOn {
+            ScryptedMQTTManager.shared.disconnect()
+        }
+        tableView.reloadSections(IndexSet(integer: Section.mqttStatus.rawValue), with: .automatic)
+    }
+
+    @objc private func save() {
+        // Save MQTT settings
+        let host = mqttHostField?.text?.trimmingCharacters(in: .whitespaces) ?? ""
+        let portText = mqttPortField?.text ?? "1883"
+        let port = Int(portText) ?? 1883
+        let username = mqttUsernameField?.text?.trimmingCharacters(in: .whitespaces)
+        let password = mqttPasswordField?.text
+
+        ScryptedMQTTManager.shared.host = host.isEmpty ? nil : host
+        ScryptedMQTTManager.shared.port = port
+        ScryptedMQTTManager.shared.username = (username?.isEmpty ?? true) ? nil : username
+        ScryptedMQTTManager.shared.password = (password?.isEmpty ?? true) ? nil : password
+
+        log("Scrypted MQTT settings saved")
+
+        // If enabled and configured, connect
+        if ScryptedMQTTManager.shared.isEnabled && ScryptedMQTTManager.shared.isConfigured {
+            ScryptedMQTTManager.shared.disconnect()
+            ScryptedMQTTManager.shared.connect()
+        }
+
+        navigationController?.popViewController(animated: true)
+    }
+
+    private func testConnection() {
+        // Save current values first
+        let host = mqttHostField?.text?.trimmingCharacters(in: .whitespaces) ?? ""
+        let portText = mqttPortField?.text ?? "1883"
+        let port = Int(portText) ?? 1883
+        let username = mqttUsernameField?.text?.trimmingCharacters(in: .whitespaces)
+        let password = mqttPasswordField?.text
+
+        guard !host.isEmpty else {
+            showAlert(title: "Missing Host", message: "Please enter an MQTT host address.")
+            return
+        }
+
+        ScryptedMQTTManager.shared.host = host
+        ScryptedMQTTManager.shared.port = port
+        ScryptedMQTTManager.shared.username = (username?.isEmpty ?? true) ? nil : username
+        ScryptedMQTTManager.shared.password = (password?.isEmpty ?? true) ? nil : password
+        ScryptedMQTTManager.shared.isEnabled = true
+        mqttEnabledSwitch?.isOn = true
+
+        // Show loading
+        let loadingAlert = UIAlertController(title: nil, message: "Connecting...", preferredStyle: .alert)
+        let indicator = UIActivityIndicatorView(style: .medium)
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.startAnimating()
+        loadingAlert.view.addSubview(indicator)
+        NSLayoutConstraint.activate([
+            indicator.centerXAnchor.constraint(equalTo: loadingAlert.view.centerXAnchor),
+            indicator.bottomAnchor.constraint(equalTo: loadingAlert.view.bottomAnchor, constant: -20)
+        ])
+        present(loadingAlert, animated: true)
+
+        // Disconnect first if connected
+        ScryptedMQTTManager.shared.disconnect()
+
+        // Try to connect
+        ScryptedMQTTManager.shared.connect()
+
+        // Check result after 5 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            loadingAlert.dismiss(animated: true) {
+                if ScryptedMQTTManager.shared.isConnected {
+                    self?.showAlert(title: "Success", message: "Connected to MQTT broker!")
+                } else {
+                    self?.showAlert(title: "Connection Failed", message: "Could not connect to \(host):\(port). Check the host and port are correct.")
+                }
+                self?.tableView.reloadData()
+            }
+        }
+    }
+
+    private func clearSettings() {
+        let alert = UIAlertController(
+            title: "Clear Settings?",
+            message: "This will remove all Scrypted MQTT settings.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Clear", style: .destructive) { [weak self] _ in
+            ScryptedMQTTManager.shared.disconnect()
+            ScryptedMQTTManager.shared.host = nil
+            ScryptedMQTTManager.shared.port = 1883
+            ScryptedMQTTManager.shared.username = nil
+            ScryptedMQTTManager.shared.password = nil
+            ScryptedMQTTManager.shared.isEnabled = false
+
+            self?.mqttHostField?.text = ""
+            self?.mqttPortField?.text = "1883"
+            self?.mqttUsernameField?.text = ""
+            self?.mqttPasswordField?.text = ""
+            self?.mqttEnabledSwitch?.isOn = false
+
+            self?.tableView.reloadData()
+            log("Scrypted MQTT settings cleared")
+        })
+        present(alert, animated: true)
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+}
+
 // MARK: - Devices View Controller
 
 class DevicesViewController: UITableViewController {
     private var allDevices: [UnifiedDevice] = []
     private var devicesByRoom: [String: [UnifiedDevice]] = [:]
     private var rooms: [String] = []
+
+    // Color scheme for each source
+    private func colorForSource(_ source: DeviceSource) -> UIColor {
+        switch source {
+        case .homeKit:
+            return .systemBlue
+        case .govee:
+            return .systemGreen
+        case .scrypted:
+            return .systemPurple
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -4070,6 +5167,15 @@ class DevicesViewController: UITableViewController {
         )
 
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "DeviceCell")
+
+        // Add legend in footer
+        let footerLabel = UILabel()
+        footerLabel.text = "🔵 HomeKit  🟢 Govee  🟣 Scrypted"
+        footerLabel.textAlignment = .center
+        footerLabel.textColor = .secondaryLabel
+        footerLabel.font = .systemFont(ofSize: 12)
+        footerLabel.frame = CGRect(x: 0, y: 0, width: tableView.bounds.width, height: 40)
+        tableView.tableFooterView = footerLabel
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -4089,14 +5195,46 @@ class DevicesViewController: UITableViewController {
             // Filter linked devices to avoid duplicates
             let filteredDevices = DeviceLinkManager.shared.filterLinkedDevices(devices)
 
-            // Group by room
-            devicesByRoom = Dictionary(grouping: filteredDevices, by: { $0.room ?? "Unknown Room" })
+            // Normalize room names for grouping (case-insensitive, trimmed)
+            // This groups "Living Room" from HomeKit with "Living Room" from Govee
+            devicesByRoom = [:]
+            var roomNameMapping: [String: String] = [:] // lowercased -> original
+
+            for device in filteredDevices {
+                let roomName = device.room ?? "Unknown Room"
+                let normalizedRoom = roomName.trimmingCharacters(in: .whitespaces).lowercased()
+
+                // Use the first encountered room name casing
+                if roomNameMapping[normalizedRoom] == nil {
+                    roomNameMapping[normalizedRoom] = roomName
+                }
+
+                let displayRoom = roomNameMapping[normalizedRoom]!
+                if devicesByRoom[displayRoom] == nil {
+                    devicesByRoom[displayRoom] = []
+                }
+                devicesByRoom[displayRoom]!.append(device)
+            }
+
+            // Sort devices within each room by source then name
+            for room in devicesByRoom.keys {
+                devicesByRoom[room]?.sort { d1, d2 in
+                    if d1.source != d2.source {
+                        // Order: HomeKit, Govee, Scrypted
+                        let order: [DeviceSource] = [.homeKit, .govee, .scrypted]
+                        let i1 = order.firstIndex(of: d1.source) ?? 0
+                        let i2 = order.firstIndex(of: d2.source) ?? 0
+                        return i1 < i2
+                    }
+                    return d1.name < d2.name
+                }
+            }
 
             // Sort rooms alphabetically, but put "Unknown Room" at the end
             rooms = devicesByRoom.keys.sorted { r1, r2 in
                 if r1 == "Unknown Room" { return false }
                 if r2 == "Unknown Room" { return true }
-                return r1 < r2
+                return r1.lowercased() < r2.lowercased()
             }
 
             await MainActor.run {
@@ -4111,8 +5249,21 @@ class DevicesViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         let room = rooms[section]
-        let count = devicesByRoom[room]?.count ?? 0
-        return "\(room) (\(count))"
+        let devices = devicesByRoom[room] ?? []
+
+        // Count devices by source for the header
+        var sourceCounts: [DeviceSource: Int] = [:]
+        for device in devices {
+            sourceCounts[device.source, default: 0] += 1
+        }
+
+        // Build source summary
+        var parts: [String] = []
+        if let hk = sourceCounts[.homeKit], hk > 0 { parts.append("🔵\(hk)") }
+        if let gov = sourceCounts[.govee], gov > 0 { parts.append("🟢\(gov)") }
+        if let scr = sourceCounts[.scrypted], scr > 0 { parts.append("🟣\(scr)") }
+
+        return "\(room) (\(devices.count)) \(parts.joined(separator: " "))"
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -4130,15 +5281,19 @@ class DevicesViewController: UITableViewController {
         // Show source and type, plus linked indicator if linked
         var secondaryParts = [device.source.rawValue, device.type]
         if DeviceLinkManager.shared.isLinked(deviceId: device.id) {
-            secondaryParts.append("Linked")
+            secondaryParts.append("🔗 Linked")
         }
-        config.secondaryText = secondaryParts.joined(separator: " - ")
+        config.secondaryText = secondaryParts.joined(separator: " · ")
         config.textProperties.color = device.isReachable ? .label : .tertiaryLabel
         config.secondaryTextProperties.color = device.isReachable ? .secondaryLabel : .tertiaryLabel
 
+        // Icon with color based on source
         let icon = deviceIcon(for: device.type)
         config.image = UIImage(systemName: icon)
-        config.imageProperties.tintColor = device.isReachable ? .systemBlue : .tertiaryLabel
+
+        // Color code by source - dim if not reachable
+        let sourceColor = colorForSource(device.source)
+        config.imageProperties.tintColor = device.isReachable ? sourceColor : sourceColor.withAlphaComponent(0.3)
 
         cell.contentConfiguration = config
         cell.accessoryType = .detailButton
@@ -4622,6 +5777,9 @@ class AppKitBridge: NSObject {
 
         // Also observe window close to prevent termination
         observeWindowClose()
+
+        // Note: Don't set activation policy here - AppDelegate.makeRegularApp() already did it
+        // Setting it again could interfere with the app's state
     }
 
     private func swizzleTerminationMethod() {
@@ -4669,11 +5827,14 @@ class AppKitBridge: NSObject {
         }
     }
 
-    func setDockIconVisible(_ visible: Bool) {
+    private func setActivationPolicy(regular: Bool) {
         guard let nsApp = NSClassFromString("NSApplication") as? NSObject.Type,
               let app = nsApp.value(forKey: "sharedApplication") as? NSObject else { return }
 
-        let policy = visible ? 0 : 1 // 0 = regular, 1 = accessory
+        // 0 = NSApplicationActivationPolicyRegular (normal app with menu bar)
+        // 1 = NSApplicationActivationPolicyAccessory (no dock icon, no menu bar)
+        // 2 = NSApplicationActivationPolicyProhibited (background only)
+        let policy = regular ? 0 : 1
 
         let selector = NSSelectorFromString("setActivationPolicy:")
         guard let method = class_getInstanceMethod(type(of: app), selector) else { return }
@@ -4682,6 +5843,45 @@ class AppKitBridge: NSObject {
         let imp = method_getImplementation(method)
         let setPolicy = unsafeBitCast(imp, to: SetPolicyFunc.self)
         setPolicy(app, selector, policy)
+    }
+
+    func setDockIconVisible(_ visible: Bool) {
+        // Note: We always keep the app as a "regular" app so it appears in App Switcher
+        // The dock icon visibility is controlled separately via NSApp.setActivationPolicy
+        // However, macOS ties dock icon to activation policy, so we have limited options:
+        // - Regular (0): Dock icon + menu bar + app switcher
+        // - Accessory (1): No dock icon, menu bar only when frontmost, still in app switcher
+        //
+        // For now, we respect the user's choice but warn that hiding dock affects behavior
+        if visible {
+            setActivationPolicy(regular: true)
+        } else {
+            // Accessory mode: no dock icon but still appears in App Switcher (Cmd+Tab)
+            // Menu bar only shows when app window is frontmost
+            setActivationPolicy(regular: false)
+        }
+    }
+
+    func activateApp() {
+        guard let nsApp = NSClassFromString("NSApplication") as? NSObject.Type,
+              let app = nsApp.value(forKey: "sharedApplication") as? NSObject else { return }
+
+        // Activate the app and bring to front
+        let activateSelector = NSSelectorFromString("activateIgnoringOtherApps:")
+        if app.responds(to: activateSelector) {
+            app.perform(activateSelector, with: true)
+        }
+    }
+
+    func unhideApp() {
+        guard let nsApp = NSClassFromString("NSApplication") as? NSObject.Type,
+              let app = nsApp.value(forKey: "sharedApplication") as? NSObject else { return }
+
+        // Unhide the application
+        let unhideSelector = NSSelectorFromString("unhide:")
+        if app.responds(to: unhideSelector) {
+            app.perform(unhideSelector, with: nil)
+        }
     }
 }
 #endif
@@ -4705,11 +5905,13 @@ class MenuBarManager: NSObject {
         // Prevent app from quitting when last window is closed
         preventTerminationOnWindowClose()
 
+        // Create status bar icon if enabled
         if SettingsManager.shared.showMenuBarIcon {
             createStatusItem()
         }
 
-        updateDockVisibility()
+        // Note: Don't call updateDockVisibility() here - AppDelegate already set the
+        // activation policy. Only apply dock visibility changes when user toggles the setting.
     }
 
     private func preventTerminationOnWindowClose() {
@@ -5013,18 +6215,23 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window?.rootViewController = MainTabController()
         window?.makeKeyAndVisible()
 
-        // Set window size constraints (slightly larger for tabs)
-        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 550, height: 750)
-        windowScene.sizeRestrictions?.maximumSize = CGSize(width: 900, height: 1100)
+        // Set window size constraints for sidebar layout
+        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 700, height: 550)
+        windowScene.sizeRestrictions?.maximumSize = CGSize(width: 1200, height: 900)
 
         // Set window title
         windowScene.title = "HomeMCPBridge"
 
-        // Set up menu bar
+        // Set up menu bar and status item
         MenuBarManager.shared.setup(windowScene: windowScene)
 
         // Build menu bar
         UIMenuSystem.main.setNeedsRebuild()
+
+        // Activate the app so it becomes frontmost and shows menu bar
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            AppKitBridge.shared.activateApp()
+        }
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {
@@ -5034,6 +6241,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         MenuBarManager.shared.windowOpened()
+        // Ensure app is activated when window becomes active
+        AppKitBridge.shared.activateApp()
     }
 
     override func buildMenu(with builder: UIMenuBuilder) {
@@ -5041,19 +6250,129 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         guard builder.system == .main else { return }
 
-        // Add useful menu items to Edit menu
-        let copyConfigAction = UIAction(title: "Copy MCP Configuration", image: UIImage(systemName: "doc.on.doc"), identifier: nil) { _ in
+        // Remove unwanted menus
+        builder.remove(menu: .format)
+
+        // === App Menu (HomeMCPBridge) ===
+        // Add Preferences to app menu
+        let preferencesAction = UIKeyCommand(
+            title: "Settings…",
+            image: UIImage(systemName: "gear"),
+            action: #selector(openPreferences),
+            input: ",",
+            modifierFlags: .command
+        )
+
+        let aboutAction = UIAction(title: "About HomeMCPBridge", image: UIImage(systemName: "info.circle")) { _ in
+            self.showAbout()
+        }
+
+        let appMenuItems = UIMenu(title: "", options: .displayInline, children: [aboutAction, preferencesAction])
+        builder.insertSibling(appMenuItems, afterMenu: .about)
+
+        // === File Menu ===
+        let copyConfigAction = UIAction(
+            title: "Copy MCP Configuration",
+            image: UIImage(systemName: "doc.on.doc"),
+            identifier: nil
+        ) { _ in
             MenuBarManager.shared.doCopyConfig()
         }
 
-        let openLoginItemsAction = UIAction(title: "Add to Login Items...", image: UIImage(systemName: "gear"), identifier: nil) { _ in
+        let exportLogAction = UIAction(
+            title: "Export Log…",
+            image: UIImage(systemName: "square.and.arrow.up"),
+            identifier: nil
+        ) { _ in
+            self.exportLog()
+        }
+
+        let fileMenuItems = UIMenu(title: "", options: .displayInline, children: [copyConfigAction, exportLogAction])
+        builder.insertChild(fileMenuItems, atStartOfMenu: .file)
+
+        // === Edit Menu ===
+        let openLoginItemsAction = UIAction(
+            title: "Add to Login Items…",
+            image: UIImage(systemName: "person.badge.plus"),
+            identifier: nil
+        ) { _ in
             if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
                 UIApplication.shared.open(url)
             }
         }
 
-        let configMenu = UIMenu(title: "", options: .displayInline, children: [copyConfigAction, openLoginItemsAction])
-        builder.insertChild(configMenu, atStartOfMenu: .edit)
+        let editMenuItems = UIMenu(title: "", options: .displayInline, children: [openLoginItemsAction])
+        builder.insertChild(editMenuItems, atEndOfMenu: .edit)
+
+        // === View Menu ===
+        let toggleStatusBarAction = UIAction(
+            title: SettingsManager.shared.showMenuBarIcon ? "Hide Status Bar Icon" : "Show Status Bar Icon",
+            image: UIImage(systemName: "menubar.rectangle"),
+            identifier: nil
+        ) { _ in
+            SettingsManager.shared.showMenuBarIcon.toggle()
+            MenuBarManager.shared.updateVisibility()
+            UIMenuSystem.main.setNeedsRebuild()
+        }
+
+        let toggleDockIconAction = UIAction(
+            title: SettingsManager.shared.showDockIcon ? "Hide Dock Icon" : "Show Dock Icon",
+            image: UIImage(systemName: "dock.rectangle"),
+            identifier: nil
+        ) { _ in
+            SettingsManager.shared.showDockIcon.toggle()
+            MenuBarManager.shared.updateDockVisibility()
+            UIMenuSystem.main.setNeedsRebuild()
+        }
+
+        let viewMenuItems = UIMenu(title: "", options: .displayInline, children: [toggleStatusBarAction, toggleDockIconAction])
+        builder.insertChild(viewMenuItems, atEndOfMenu: .view)
+
+        // === Help Menu ===
+        let helpAction = UIAction(title: "HomeMCPBridge Help", image: UIImage(systemName: "questionmark.circle")) { _ in
+            if let url = URL(string: "https://github.com/coalsi/HomeMCPBridge") {
+                UIApplication.shared.open(url)
+            }
+        }
+
+        let helpMenuItems = UIMenu(title: "", options: .displayInline, children: [helpAction])
+        builder.replaceChildren(ofMenu: .help) { _ in [helpMenuItems] }
+    }
+
+    @objc func openPreferences() {
+        // Switch to Status tab (which has settings)
+        if let tabController = window?.rootViewController as? MainTabController {
+            tabController.selectedIndex = 0  // Status tab
+        }
+        window?.makeKeyAndVisible()
+        AppKitBridge.shared.activateApp()
+    }
+
+    func showAbout() {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+
+        let alert = UIAlertController(
+            title: "HomeMCPBridge",
+            message: "Version \(version) (\(build))\n\nNative macOS HomeKit integration for AI assistants via the Model Context Protocol.\n\n© 2024 HomeMCPBridge",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        window?.rootViewController?.present(alert, animated: true)
+    }
+
+    func exportLog() {
+        let logEntries = ActivityLog.shared.getEntries()
+        let logContent = logEntries.joined(separator: "\n")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("HomeMCPBridge.log")
+        try? logContent.write(to: tempURL, atomically: true, encoding: String.Encoding.utf8)
+
+        let activityVC = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = window?.rootViewController?.view
+            popover.sourceRect = CGRect(x: 100, y: 100, width: 1, height: 1)
+        }
+        window?.rootViewController?.present(activityVC, animated: true)
     }
 }
 #endif
@@ -5066,6 +6385,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         log("HomeMCPBridge v2.0.0 starting...")
+
+        #if targetEnvironment(macCatalyst)
+        // CRITICAL: Set activation policy to Regular immediately so app appears in app switcher
+        // This must happen before any UI is shown
+        makeRegularApp()
+        #endif
 
         // Register plugins
         log("Registering plugins...")
@@ -5091,6 +6416,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 MotionSensorManager.shared.subscribeToEvents()
                 ContactSensorManager.shared.subscribeToEvents()
                 log("Motion and contact event subscriptions initialized")
+
+                // Auto-connect to Scrypted MQTT if configured
+                if ScryptedMQTTManager.shared.isEnabled && ScryptedMQTTManager.shared.isConfigured {
+                    ScryptedMQTTManager.shared.connect()
+                }
             }
 
             // Start MCP server on background thread after plugins are initialized
@@ -5112,6 +6442,36 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didDiscardSceneSessions sceneSessions: Set<UISceneSession>) {
         // Window was closed - don't quit, just update state
         MenuBarManager.shared.windowClosed()
+    }
+
+    /// Makes the app a regular macOS app that appears in the Dock and App Switcher
+    private func makeRegularApp() {
+        guard let nsAppClass = NSClassFromString("NSApplication"),
+              let sharedApp = nsAppClass.value(forKey: "sharedApplication") as? NSObject else {
+            return
+        }
+
+        // NSApplicationActivationPolicyRegular = 0 (normal app with dock icon and menu bar)
+        // NSApplicationActivationPolicyAccessory = 1 (no dock icon, menu bar only when active)
+        // NSApplicationActivationPolicyProhibited = 2 (background only, no UI)
+        let regularPolicy = 0
+
+        let selector = NSSelectorFromString("setActivationPolicy:")
+        if sharedApp.responds(to: selector) {
+            // Use NSInvocation-style call for Int parameter
+            typealias SetPolicyFunc = @convention(c) (NSObject, Selector, Int) -> Bool
+            let method = class_getInstanceMethod(type(of: sharedApp), selector)!
+            let impl = method_getImplementation(method)
+            let setPolicy = unsafeBitCast(impl, to: SetPolicyFunc.self)
+            _ = setPolicy(sharedApp, selector, regularPolicy)
+            log("Set app to regular activation policy (appears in Dock/App Switcher)")
+        }
+
+        // Also activate the app to bring it to front
+        let activateSelector = NSSelectorFromString("activateIgnoringOtherApps:")
+        if sharedApp.responds(to: activateSelector) {
+            sharedApp.perform(activateSelector, with: true)
+        }
     }
     #endif
 

@@ -77,11 +77,10 @@ When MCPPost is configured, your AI system receives real-time events and can:
 - Send alerts when doors open unexpectedly
 - React to doorbell rings with camera views
 
-### Scrypted NVR (requires configuration)
+### Scrypted NVR (via MQTT)
 - `scrypted_list_cameras` - List all Scrypted cameras with capabilities
 - `scrypted_capture_snapshot` - Capture snapshot from Scrypted camera (by ID or name)
 - `scrypted_get_camera_state` - Get camera state including motion detection
-- `scrypted_set_webhook_token` - Configure webhook token for a camera (required for snapshots)
 
 ## Building
 
@@ -110,24 +109,29 @@ Configure with `configure_plugin` tool:
 - `apiKey` - Govee API key (get from Govee app)
 
 ### Scrypted NVR
-Configure with `configure_plugin` tool:
+Configure in the Settings tab under "Scrypted MQTT":
+- `host` - Scrypted MQTT broker host (e.g., `mac-mini.local`)
+- `port` - MQTT port (default: 1883)
+- `username` - Optional MQTT username
+- `password` - Optional MQTT password
+
+Also configure with `configure_plugin` tool for snapshot capability:
 - `host` - Scrypted server URL (e.g., `https://mac-mini.local:10443`)
 - `username` - Scrypted admin username
 - `password` - Scrypted admin password
 
 The Scrypted plugin supports:
-- Listing all cameras with their capabilities (motion detection, audio)
-- Capturing snapshots from any camera (requires Webhook plugin)
-- Getting camera state including motion detection status
+- Automatic camera discovery via MQTT (no per-camera setup needed)
+- Real-time motion detection events via MQTT
+- Capturing snapshots from any discovered camera
 - Accepts self-signed SSL certificates (common for local Scrypted installs)
 
-**Scrypted Webhook Setup (required for snapshots):**
-1. Install the `@scrypted/webhook` plugin in Scrypted
-2. For each camera, go to Settings > Webhook > Create Webhook > Select "Camera"
-3. Note the webhook token from the generated URL (the random string after the device ID)
-4. Use `scrypted_set_webhook_token` to configure each camera:
-   - Example URL: `https://host/endpoint/@scrypted/webhook/public/45/11e64f2c7b7027ef/takePicture`
-   - device_id: `45`, token: `11e64f2c7b7027ef`
+**Scrypted MQTT Setup:**
+1. Install the `@scrypted/mqtt` plugin in Scrypted
+2. Enable the built-in MQTT Broker in the MQTT plugin settings
+3. Enable MQTT on each camera you want to discover
+4. Configure Scrypted MQTT in the HomeMCPBridge Settings tab
+5. Cameras are automatically discovered - no manual configuration needed!
 
 ## Key Files
 
