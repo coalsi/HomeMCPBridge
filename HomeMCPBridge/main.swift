@@ -4411,7 +4411,7 @@ class LogViewController: UIViewController {
 
 // MARK: - Main Split Controller (Finder-style sidebar)
 
-class MainSplitController: UIViewController {
+class MainSplitController: UISplitViewController {
 
     enum SidebarItem: String, CaseIterable {
         case status = "Status"
@@ -4433,88 +4433,42 @@ class MainSplitController: UIViewController {
         }
     }
 
-    private let sidebarWidth: CGFloat = 200
-    private var sidebarView: UIView!
-    private var contentView: UIView!
-    private var sidebarTableView: UITableView!
-    private var currentDetailVC: UIViewController?
+    private var sidebarVC: SidebarCollectionViewController!
     var selectedIndex: Int = 0
+
+    init() {
+        super.init(style: .doubleColumn)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        setupLayout()
+
+        // Configure for Mac Catalyst native sidebar
+        primaryBackgroundStyle = .sidebar
+        preferredDisplayMode = .oneBesideSecondary
+        preferredSplitBehavior = .tile
+
+        // Column widths
+        preferredPrimaryColumnWidthFraction = 0.25
+        minimumPrimaryColumnWidth = 200
+        maximumPrimaryColumnWidth = 280
+
+        // Create sidebar with collection view (native sidebar style)
+        sidebarVC = SidebarCollectionViewController { [weak self] item in
+            self?.showDetailViewController(for: item)
+        }
+        setViewController(sidebarVC, for: .primary)
+
+        // Show initial detail
         showDetailViewController(for: .status)
     }
 
-    private func setupLayout() {
-        // Sidebar container
-        sidebarView = UIView()
-        sidebarView.backgroundColor = UIColor(named: "SidebarBackground") ?? UIColor.secondarySystemBackground
-        sidebarView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(sidebarView)
-
-        // Content container
-        contentView = UIView()
-        contentView.backgroundColor = .systemBackground
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(contentView)
-
-        // Divider line
-        let divider = UIView()
-        divider.backgroundColor = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(divider)
-
-        NSLayoutConstraint.activate([
-            // Sidebar
-            sidebarView.topAnchor.constraint(equalTo: view.topAnchor),
-            sidebarView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            sidebarView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarView.widthAnchor.constraint(equalToConstant: sidebarWidth),
-
-            // Divider
-            divider.topAnchor.constraint(equalTo: view.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            divider.leadingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
-            divider.widthAnchor.constraint(equalToConstant: 1),
-
-            // Content
-            contentView.topAnchor.constraint(equalTo: view.topAnchor),
-            contentView.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        ])
-
-        setupSidebar()
-    }
-
-    private func setupSidebar() {
-        sidebarTableView = UITableView(frame: .zero, style: .plain)
-        sidebarTableView.delegate = self
-        sidebarTableView.dataSource = self
-        sidebarTableView.register(UITableViewCell.self, forCellReuseIdentifier: "SidebarCell")
-        sidebarTableView.translatesAutoresizingMaskIntoConstraints = false
-        sidebarTableView.backgroundColor = .clear
-        sidebarTableView.separatorStyle = .none
-        sidebarTableView.rowHeight = 36
-        sidebarView.addSubview(sidebarTableView)
-
-        NSLayoutConstraint.activate([
-            sidebarTableView.topAnchor.constraint(equalTo: sidebarView.safeAreaLayoutGuide.topAnchor, constant: 8),
-            sidebarTableView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 12),
-            sidebarTableView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -12),
-            sidebarTableView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor)
-        ])
-    }
-
     private func showDetailViewController(for item: SidebarItem) {
-        // Remove current detail VC
-        if let current = currentDetailVC {
-            current.willMove(toParent: nil)
-            current.view.removeFromSuperview()
-            current.removeFromParent()
-        }
+        selectedIndex = SidebarItem.allCases.firstIndex(of: item) ?? 0
 
         let viewController: UIViewController
         switch item {
@@ -4523,7 +4477,6 @@ class MainSplitController: UIViewController {
         case .devices:
             viewController = DevicesViewController()
         case .plugins:
-            // Wrap in nav controller so plugin config can be pushed
             let pluginsVC = PluginsViewController()
             let navController = UINavigationController(rootViewController: pluginsVC)
             viewController = navController
@@ -4535,76 +4488,91 @@ class MainSplitController: UIViewController {
             viewController = LogViewController()
         }
 
-        // Add new detail VC
-        addChild(viewController)
-        viewController.view.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(viewController.view)
-        NSLayoutConstraint.activate([
-            viewController.view.topAnchor.constraint(equalTo: contentView.topAnchor),
-            viewController.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            viewController.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            viewController.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-        viewController.didMove(toParent: self)
-        currentDetailVC = viewController
+        setViewController(viewController, for: .secondary)
     }
 
     func selectItem(_ item: SidebarItem) {
-        guard let index = SidebarItem.allCases.firstIndex(of: item) else { return }
-        selectedIndex = index
-        sidebarTableView.reloadData()
+        sidebarVC.selectItem(item)
         showDetailViewController(for: item)
     }
 }
 
-extension MainSplitController: UITableViewDelegate, UITableViewDataSource {
-    func numberOfSections(in tableView: UITableView) -> Int { 1 }
+// Native sidebar using UICollectionView with .sidebar appearance
+class SidebarCollectionViewController: UIViewController {
+    typealias SelectionHandler = (MainSplitController.SidebarItem) -> Void
 
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        SidebarItem.allCases.count
+    private var collectionView: UICollectionView!
+    private var dataSource: UICollectionViewDiffableDataSource<Int, MainSplitController.SidebarItem>!
+    private let selectionHandler: SelectionHandler
+
+    init(selectionHandler: @escaping SelectionHandler) {
+        self.selectionHandler = selectionHandler
+        super.init(nibName: nil, bundle: nil)
     }
 
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "SidebarCell", for: indexPath)
-        let item = SidebarItem.allCases[indexPath.row]
-        let isSelected = indexPath.row == selectedIndex
-
-        var config = cell.defaultContentConfiguration()
-        config.text = item.rawValue
-        config.image = item.icon
-        config.textProperties.font = .systemFont(ofSize: 13, weight: .medium)
-        config.imageProperties.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-
-        if isSelected {
-            config.textProperties.color = .white
-            config.imageProperties.tintColor = .white
-            cell.backgroundColor = .systemBlue
-        } else {
-            config.textProperties.color = .label
-            config.imageProperties.tintColor = .systemBlue
-            cell.backgroundColor = .clear
-        }
-
-        cell.contentConfiguration = config
-        cell.selectionStyle = .none
-        cell.layer.cornerRadius = 6
-        cell.layer.masksToBounds = true
-
-        return cell
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
-    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let previousIndex = selectedIndex
-        selectedIndex = indexPath.row
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        configureCollectionView()
+        configureDataSource()
+        applyInitialSnapshot()
 
-        // Reload affected cells
-        var indexPaths = [indexPath]
-        if previousIndex != selectedIndex {
-            indexPaths.append(IndexPath(row: previousIndex, section: 0))
+        // Select first item by default
+        DispatchQueue.main.async {
+            let indexPath = IndexPath(item: 0, section: 0)
+            self.collectionView.selectItem(at: indexPath, animated: false, scrollPosition: [])
         }
-        tableView.reloadRows(at: indexPaths, with: .none)
+    }
 
-        showDetailViewController(for: SidebarItem.allCases[indexPath.row])
+    private func configureCollectionView() {
+        let layout = UICollectionViewCompositionalLayout { _, layoutEnvironment in
+            var config = UICollectionLayoutListConfiguration(appearance: .sidebar)
+            config.showsSeparators = false
+            config.headerMode = .none
+            return NSCollectionLayoutSection.list(using: config, layoutEnvironment: layoutEnvironment)
+        }
+
+        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
+        collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        collectionView.delegate = self
+        collectionView.backgroundColor = .clear
+        view.addSubview(collectionView)
+    }
+
+    private func configureDataSource() {
+        let cellRegistration = UICollectionView.CellRegistration<UICollectionViewListCell, MainSplitController.SidebarItem> { cell, indexPath, item in
+            var config = cell.defaultContentConfiguration()
+            config.text = item.rawValue
+            config.image = item.icon
+            cell.contentConfiguration = config
+        }
+
+        dataSource = UICollectionViewDiffableDataSource<Int, MainSplitController.SidebarItem>(collectionView: collectionView) { collectionView, indexPath, item in
+            return collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: item)
+        }
+    }
+
+    private func applyInitialSnapshot() {
+        var snapshot = NSDiffableDataSourceSnapshot<Int, MainSplitController.SidebarItem>()
+        snapshot.appendSections([0])
+        snapshot.appendItems(MainSplitController.SidebarItem.allCases, toSection: 0)
+        dataSource.apply(snapshot, animatingDifferences: false)
+    }
+
+    func selectItem(_ item: MainSplitController.SidebarItem) {
+        guard let index = MainSplitController.SidebarItem.allCases.firstIndex(of: item) else { return }
+        let indexPath = IndexPath(item: index, section: 0)
+        collectionView.selectItem(at: indexPath, animated: true, scrollPosition: [])
+    }
+}
+
+extension SidebarCollectionViewController: UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
+        selectionHandler(item)
     }
 }
 
@@ -5672,8 +5640,70 @@ class MCPPostViewController: UIViewController {
             eventTableView.topAnchor.constraint(equalTo: eventsLabel.bottomAnchor, constant: 10),
             eventTableView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
             eventTableView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
-            eventTableView.heightAnchor.constraint(equalToConstant: 300),
-            eventTableView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
+            eventTableView.heightAnchor.constraint(equalToConstant: 250)
+        ])
+
+        // Integration Guide Section
+        let guideLabel = UILabel()
+        guideLabel.text = "Integration Guide"
+        guideLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        guideLabel.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(guideLabel)
+
+        let guideText = """
+Your server should accept POST requests with JSON payloads:
+
+POST /your-endpoint
+Content-Type: application/json
+
+{
+  "event_id": "uuid",
+  "event_type": "motion|contact|doorbell|occupancy",
+  "source": "HomeKit",
+  "timestamp": "2024-01-18T21:00:00Z",
+  "sensor": {
+    "name": "Front Door Motion",
+    "id": "uuid",
+    "room": "Hallway",
+    "home": "Home"
+  },
+  "data": {
+    "detected": true,
+    "state": "open"
+  }
+}
+
+Example Python Flask endpoint:
+
+from flask import Flask, request
+app = Flask(__name__)
+
+@app.route('/events', methods=['POST'])
+def receive_event():
+    event = request.json
+    print(f"Event: {event['event_type']} from {event['sensor']['name']}")
+    # Process event (turn on lights, send notification, etc.)
+    return {'status': 'ok'}, 200
+"""
+        let guideTextView = UITextView()
+        guideTextView.text = guideText
+        guideTextView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        guideTextView.backgroundColor = UIColor(white: 0.15, alpha: 1.0)
+        guideTextView.textColor = UIColor(red: 0.6, green: 0.9, blue: 0.6, alpha: 1.0)
+        guideTextView.isEditable = false
+        guideTextView.isScrollEnabled = true
+        guideTextView.layer.cornerRadius = 8
+        guideTextView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(guideTextView)
+
+        NSLayoutConstraint.activate([
+            guideLabel.topAnchor.constraint(equalTo: eventTableView.bottomAnchor, constant: 24),
+            guideLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            guideTextView.topAnchor.constraint(equalTo: guideLabel.bottomAnchor, constant: 10),
+            guideTextView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            guideTextView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
+            guideTextView.heightAnchor.constraint(equalToConstant: 400),
+            guideTextView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
         ])
 
         // Add tap gesture to dismiss keyboard
@@ -5813,9 +5843,19 @@ extension MCPPostViewController: UITableViewDataSource, UITableViewDelegate {
 
         if recentEvents.isEmpty {
             var config = cell.defaultContentConfiguration()
-            config.text = "No events yet"
-            config.textProperties.color = .tertiaryLabel
-            config.textProperties.alignment = .center
+            let devices = MCPPostManager.shared.listEventProducingDevices()
+            if devices.count > 0 {
+                config.text = "Waiting for events..."
+                config.secondaryText = "Motion, contact, or doorbell events from your \(devices.count) sensors will appear here"
+                config.image = UIImage(systemName: "antenna.radiowaves.left.and.right")
+                config.imageProperties.tintColor = .systemBlue
+            } else {
+                config.text = "No event sensors found"
+                config.secondaryText = "Add motion, contact, or doorbell sensors to HomeKit"
+                config.image = UIImage(systemName: "sensor.fill")
+                config.imageProperties.tintColor = .tertiaryLabel
+            }
+            config.textProperties.color = .secondaryLabel
             cell.contentConfiguration = config
             cell.selectionStyle = .none
         } else {
