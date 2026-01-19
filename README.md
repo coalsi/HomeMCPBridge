@@ -15,6 +15,11 @@ HomeMCPBridge is a macOS app that lets AI assistants (Claude, and others that su
 - **All Device Types** - Lights, switches, outlets, fans, locks, garage doors, thermostats
 - **Full Control** - On/off, brightness, color (hue/saturation), lock/unlock, open/close
 - **Menu Bar App** - Runs quietly in the background with a status window
+- **Plugin System** - Extend with Govee, Scrypted NVR, and more
+- **Device Linking** - Link HomeKit devices with plugin counterparts to avoid duplicates
+- **MCPPost** - Broadcast real-time sensor events to your AI system
+- **Camera Snapshots** - Capture images from HomeKit and Scrypted cameras
+- **Motion Events** - Monitor motion sensors, doorbells, and contact sensors
 
 ## Requirements
 
@@ -85,16 +90,41 @@ Once configured, you can ask your AI things like:
 - "Turn off all the backyard lights"
 - "Lock the front door"
 - "Is the garage door open?"
+- "Capture a snapshot from the front door camera"
+- "Is there motion in the backyard?"
 
 ## Available MCP Tools
 
+### Device Control
 | Tool | Description |
 |------|-------------|
-| `list_devices` | List all HomeKit devices with names, rooms, types, and status |
+| `list_devices` | List all devices from HomeKit and plugins |
 | `list_rooms` | List all rooms in all homes |
 | `list_homes` | List all configured HomeKit homes |
-| `get_device_state` | Get current state of a device (on/off, brightness, color, etc.) |
+| `get_device_state` | Get current state of a device |
 | `control_device` | Control a device (on, off, toggle, brightness, color, lock, unlock, open, close) |
+
+### Cameras
+| Tool | Description |
+|------|-------------|
+| `list_cameras` | List all HomeKit cameras |
+| `capture_snapshot` | Capture image from camera (returns base64) |
+
+### Motion & Events
+| Tool | Description |
+|------|-------------|
+| `list_motion_sensors` | List motion sensors, occupancy sensors, doorbells |
+| `get_motion_state` | Get current motion detection state |
+| `subscribe_events` | Enable motion and contact event buffering |
+| `get_pending_events` | Poll for buffered motion/doorbell/contact events |
+
+### Scrypted NVR (requires configuration)
+| Tool | Description |
+|------|-------------|
+| `scrypted_list_cameras` | List all Scrypted cameras with capabilities |
+| `scrypted_capture_snapshot` | Capture snapshot from Scrypted camera |
+| `scrypted_get_camera_state` | Get camera state including motion detection |
+| `scrypted_set_webhook_token` | Configure webhook token for a camera |
 
 ## Supported Device Types
 
@@ -106,60 +136,135 @@ Once configured, you can ask your AI things like:
 - **Garage Doors** - Open/close
 - **Thermostats** - Read temperature (control coming soon)
 - **Sensors** - Read values
+- **Cameras** - Capture snapshots
+- **Motion Sensors** - Detect motion/occupancy
+- **Contact Sensors** - Door/window open/close
+
+---
+
+## App Tabs
+
+### Status
+Overview of your smart home setup:
+- Apple HomeKit device count
+- Plugin status and device counts
+- Device link count
+- App settings (menu bar, dock icon)
+
+### Devices
+Browse all devices organized by room:
+- Tap (i) to link/unlink devices
+- Shows device source (HomeKit, Govee, etc.)
+- Indicates linked devices
+
+### Plugins
+Configure third-party integrations:
+- Govee - Smart lights and appliances
+- Scrypted NVR - Network video recorder cameras
+
+### MCPPost
+Broadcast real-time sensor events to your AI:
+- Configure webhook endpoint URL
+- Enable/disable event broadcasting
+- View recent events and their status
+- Test endpoint connectivity
+
+### Setup
+Complete setup guide with:
+- MCP configuration snippets
+- Plugin setup instructions (Govee, Scrypted)
+- MCPPost configuration
+- Device linking guide
+
+### Log
+Full activity log for debugging:
+- All MCP tool calls
+- Plugin activity
+- Event notifications
+- Clear and scroll controls
+
+---
+
+## Device Linking
+
+When you have the same device in both HomeKit and a plugin (like Govee), you can link them so they're treated as one device:
+
+1. Go to the **Devices** tab
+2. Tap the **(i)** button on any device
+3. Select **"Link Device..."**
+4. Choose the corresponding device from another source
+
+Linked devices use the most capable source automatically (plugins usually have more features than HomeKit).
+
+---
+
+## MCPPost (Event Broadcasting)
+
+MCPPost broadcasts real-time sensor events to a custom HTTP endpoint, enabling your AI system (like Jarvis) to receive push notifications.
+
+### Configuration
+1. Open HomeMCPBridge
+2. Go to the **MCPPost** tab
+3. Enter your endpoint URL (e.g., `http://localhost:8000/api/events`)
+4. Enable broadcasting with the toggle
+5. Click "Test Endpoint" to verify
+
+### Supported Events
+- **Motion sensors** - Motion detected/cleared
+- **Occupancy sensors** - Room occupancy changes
+- **Doorbells** - Ring events
+- **Contact sensors** - Door/window open/close
+
+### Event Payload
+```json
+{
+  "event_id": "uuid",
+  "event_type": "motion|occupancy|doorbell|contact",
+  "source": "HomeKit",
+  "timestamp": "2024-01-18T21:00:00Z",
+  "sensor": {
+    "name": "Front Door Motion",
+    "id": "sensor-uuid",
+    "room": "Hallway",
+    "home": "Home"
+  },
+  "data": {
+    "detected": true,
+    "state": "open",
+    "isOpen": true
+  }
+}
+```
 
 ---
 
 ## Plugin System
 
-HomeMCPBridge v2.0 introduces a plugin architecture that allows integration with third-party smart home platforms beyond Apple HomeKit.
-
 ### Built-in Plugins
 
 | Plugin | Authentication | Description |
 |--------|----------------|-------------|
-| **Apple HomeKit** | Native (always enabled) | Direct access to HomeKit devices via Apple's framework |
+| **Apple HomeKit** | Native (always enabled) | Direct access to HomeKit devices |
 | **Govee** | API Key | Control Govee smart lights and appliances |
-| **Aqara** | API Key + Token | Control Aqara sensors, switches, and smart home devices |
-
-### Configuring Plugins
-
-1. Open HomeMCPBridge
-2. Go to the **Plugins** tab
-3. Tap on a plugin to configure credentials
-4. Toggle the switch to enable/disable the plugin
+| **Scrypted NVR** | Username/Password | Access Scrypted cameras and motion detection |
 
 ### Govee Setup
 
 1. Open the Govee Home app on your phone
 2. Go to **Settings > About Us > Apply for API Key**
 3. Wait for approval (usually within a few days)
-4. Once approved, copy your API key
+4. Copy your API key from the email
 5. In HomeMCPBridge, go to **Plugins > Govee** and enter your API key
 6. Enable the Govee plugin
 
-### Aqara Setup
+### Scrypted NVR Setup
 
-1. Register as a developer at [developer.aqara.com](https://developer.aqara.com)
-2. Create a project to get your **App ID**, **Key ID**, and **App Key**
-3. Go to **Authorization management** and authorize your Aqara account
-4. Copy the **Access Token** and **Refresh Token** from the authorization
-5. In HomeMCPBridge, go to **Plugins > Aqara** and enter:
-   - App ID (from your project)
-   - Key ID (found under App Key in project details)
-   - App Key (the secret key)
-   - Access Token (from authorization management)
-   - Refresh Token (from authorization management)
-   - Region: `cn` for China, `us` for USA, `eu` for Europe
-6. Save and enable the Aqara plugin
-
-**Note:** Access tokens expire after 7 days. Refresh tokens expire after 30 days. You'll need to re-authorize through the Aqara developer console when they expire.
-
-### Devices Tab
-
-The new **Devices** tab shows all devices from all enabled plugins, organized by source:
-- See device names, types, rooms, and reachability status
-- Use the refresh button (↻) to update the device list
-- Devices are grouped by HomeKit, Govee, Aqara, etc.
+1. Install and configure Scrypted on your network
+2. Note your Scrypted server URL (e.g., `https://mac-mini.local:10443`)
+3. Install the `@scrypted/webhook` plugin in Scrypted
+4. For each camera, create a Camera webhook and note the token
+5. In HomeMCPBridge, go to **Plugins > Scrypted** and enter credentials
+6. Use `scrypted_set_webhook_token` tool to configure each camera's token
 
 ---
 
@@ -169,18 +274,16 @@ Want to add support for another smart home platform? Here's how to create a cust
 
 ### Plugin Protocol
 
-All plugins must conform to the `DevicePlugin` protocol:
-
 ```swift
 protocol DevicePlugin: AnyObject {
-    var identifier: String { get }        // Unique ID (e.g., "myplatform")
-    var displayName: String { get }       // UI display name
-    var isEnabled: Bool { get set }       // Whether plugin is active
-    var isConfigured: Bool { get }        // Whether credentials are set
-    var configurationFields: [PluginConfigField] { get }  // UI config fields
+    var identifier: String { get }
+    var displayName: String { get }
+    var isEnabled: Bool { get set }
+    var isConfigured: Bool { get }
+    var configurationFields: [PluginConfigField] { get }
 
-    func initialize() async throws        // Called when enabled
-    func shutdown() async                 // Called when disabled
+    func initialize() async throws
+    func shutdown() async
     func listDevices() async throws -> [UnifiedDevice]
     func getDeviceState(deviceId: String) async throws -> [String: Any]
     func controlDevice(deviceId: String, action: String, value: Any?) async throws -> ControlResult
@@ -189,92 +292,22 @@ protocol DevicePlugin: AnyObject {
 }
 ```
 
-### Example Plugin Structure
-
-```swift
-class MyPlatformPlugin: DevicePlugin {
-    let identifier = "myplatform"
-    let displayName = "My Platform"
-    var isEnabled = false
-
-    var isConfigured: Bool {
-        CredentialManager.shared.retrieve(key: "apiKey", plugin: identifier) != nil
-    }
-
-    var configurationFields: [PluginConfigField] {
-        [PluginConfigField(
-            key: "apiKey",
-            label: "API Key",
-            placeholder: "Enter your API key",
-            isSecure: true,
-            helpText: "Get your API key from myplatform.com"
-        )]
-    }
-
-    func initialize() async throws {
-        guard isConfigured else { throw PluginError.notConfigured }
-        // Validate credentials and cache device list
-    }
-
-    func listDevices() async throws -> [UnifiedDevice] {
-        // Fetch devices from your platform's API
-        // Return as UnifiedDevice objects
-    }
-
-    // Implement remaining methods...
-}
-```
-
 ### Registering Your Plugin
-
-Add your plugin to the AppDelegate:
 
 ```swift
 func application(_ application: UIApplication, didFinishLaunchingWithOptions...) {
-    // ...
     PluginManager.shared.register(MyPlatformPlugin())
-    // ...
 }
 ```
 
-### UnifiedDevice Model
-
-All plugins return devices using a common format:
-
-```swift
-struct UnifiedDevice {
-    let id: String           // Unique device identifier
-    let name: String         // Display name
-    let room: String?        // Room location (optional)
-    let type: String         // Device type: light, switch, outlet, fan, lock, etc.
-    let source: DeviceSource // Which plugin owns this device
-    let isReachable: Bool    // Is device online?
-    let manufacturer: String?
-    let model: String?
-}
-```
-
-### Secure Credential Storage
-
-Use `CredentialManager` for secure Keychain storage:
-
-```swift
-// Store a credential
-CredentialManager.shared.store(key: "apiKey", value: "secret123", plugin: "myplatform")
-
-// Retrieve a credential
-let key = CredentialManager.shared.retrieve(key: "apiKey", plugin: "myplatform")
-
-// Delete a credential
-CredentialManager.shared.delete(key: "apiKey", plugin: "myplatform")
-```
+---
 
 ## Privacy
 
 HomeMCPBridge:
 - Runs entirely on your Mac
 - Communicates directly with your HomeKit devices via Apple's framework
-- Does not send any data to external servers
+- Does not send any data to external servers (except MCPPost, which you configure)
 - Does not require an internet connection for local device control
 
 ## Troubleshooting
@@ -292,6 +325,11 @@ HomeMCPBridge:
 - Ensure the app is running (check the menu bar)
 - Verify the path in your MCP config matches where you installed the app
 - Restart your AI assistant after changing the config
+
+**Scrypted snapshots not working**
+- Ensure the @scrypted/webhook plugin is installed
+- Create a Camera webhook for each camera in Scrypted
+- Use `scrypted_set_webhook_token` to configure the tokens
 
 ## Contributing
 
