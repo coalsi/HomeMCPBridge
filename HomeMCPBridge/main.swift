@@ -4360,27 +4360,30 @@ class MainSplitController: UISplitViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Configure for Mac Catalyst
+        // Configure for Mac Catalyst - use unspecified to let system decide
         primaryBackgroundStyle = .sidebar
         preferredDisplayMode = .oneBesideSecondary
-        preferredSplitBehavior = .tile
 
         // Column widths
-        preferredPrimaryColumnWidthFraction = 0.22
-        minimumPrimaryColumnWidth = 200
-        maximumPrimaryColumnWidth = 280
+        preferredPrimaryColumnWidthFraction = 0.25
+        minimumPrimaryColumnWidth = 180
+        maximumPrimaryColumnWidth = 240
 
-        // Create sidebar
+        // Create sidebar wrapped in nav controller
         sidebarViewController = SidebarViewController()
         sidebarViewController.delegate = self
+        let sidebarNav = UINavigationController(rootViewController: sidebarViewController)
+        sidebarNav.navigationBar.isHidden = true
 
         // Set sidebar as primary
-        setViewController(sidebarViewController, for: .primary)
+        setViewController(sidebarNav, for: .primary)
 
-        // Set initial detail view
+        // Set initial detail view wrapped in nav controller
         let statusVC = StatusViewController()
         currentDetailVC = statusVC
-        setViewController(statusVC, for: .secondary)
+        let detailNav = UINavigationController(rootViewController: statusVC)
+        detailNav.navigationBar.isHidden = true
+        setViewController(detailNav, for: .secondary)
     }
 
     // Select a sidebar item programmatically
@@ -4420,7 +4423,9 @@ extension MainSplitController: SidebarViewControllerDelegate {
         }
 
         currentDetailVC = viewController
-        setViewController(viewController, for: .secondary)
+        let detailNav = UINavigationController(rootViewController: viewController)
+        detailNav.navigationBar.isHidden = true
+        setViewController(detailNav, for: .secondary)
     }
 }
 
