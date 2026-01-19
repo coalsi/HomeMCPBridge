@@ -4324,7 +4324,7 @@ class LogViewController: UIViewController {
 
 // MARK: - Main Split Controller (Finder-style sidebar)
 
-class MainSplitController: UISplitViewController {
+class MainSplitController: UIViewController {
 
     enum SidebarItem: String, CaseIterable {
         case status = "Status"
@@ -4346,67 +4346,90 @@ class MainSplitController: UISplitViewController {
         }
     }
 
-    private var sidebarViewController: SidebarViewController!
+    private let sidebarWidth: CGFloat = 200
+    private var sidebarView: UIView!
+    private var contentView: UIView!
+    private var sidebarTableView: UITableView!
     private var currentDetailVC: UIViewController?
-
-    init() {
-        super.init(style: .doubleColumn)
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-    }
+    var selectedIndex: Int = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        // Configure for Mac Catalyst - use unspecified to let system decide
-        primaryBackgroundStyle = .sidebar
-        preferredDisplayMode = .oneBesideSecondary
-
-        // Column widths
-        preferredPrimaryColumnWidthFraction = 0.25
-        minimumPrimaryColumnWidth = 180
-        maximumPrimaryColumnWidth = 240
-
-        // Create sidebar wrapped in nav controller
-        sidebarViewController = SidebarViewController()
-        sidebarViewController.delegate = self
-        let sidebarNav = UINavigationController(rootViewController: sidebarViewController)
-        sidebarNav.navigationBar.isHidden = true
-
-        // Set sidebar as primary
-        setViewController(sidebarNav, for: .primary)
-
-        // Set initial detail view wrapped in nav controller
-        let statusVC = StatusViewController()
-        currentDetailVC = statusVC
-        let detailNav = UINavigationController(rootViewController: statusVC)
-        detailNav.navigationBar.isHidden = true
-        setViewController(detailNav, for: .secondary)
+        view.backgroundColor = .systemBackground
+        setupLayout()
+        showDetailViewController(for: .status)
     }
 
-    // Select a sidebar item programmatically
-    func selectItem(_ item: SidebarItem) {
-        sidebarViewController.selectItem(item)
+    private func setupLayout() {
+        // Sidebar container
+        sidebarView = UIView()
+        sidebarView.backgroundColor = UIColor(named: "SidebarBackground") ?? UIColor.secondarySystemBackground
+        sidebarView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(sidebarView)
+
+        // Content container
+        contentView = UIView()
+        contentView.backgroundColor = .systemBackground
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(contentView)
+
+        // Divider line
+        let divider = UIView()
+        divider.backgroundColor = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(divider)
+
+        NSLayoutConstraint.activate([
+            // Sidebar
+            sidebarView.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebarView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            sidebarView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            sidebarView.widthAnchor.constraint(equalToConstant: sidebarWidth),
+
+            // Divider
+            divider.topAnchor.constraint(equalTo: view.topAnchor),
+            divider.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            divider.leadingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
+
+            // Content
+            contentView.topAnchor.constraint(equalTo: view.topAnchor),
+            contentView.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+
+        setupSidebar()
     }
 
-    // Compatibility property for old tab-based code
-    var selectedIndex: Int {
-        get { sidebarViewController.selectedIndex }
-        set {
-            let items = SidebarItem.allCases
-            if newValue >= 0 && newValue < items.count {
-                selectItem(items[newValue])
-            }
+    private func setupSidebar() {
+        sidebarTableView = UITableView(frame: .zero, style: .plain)
+        sidebarTableView.delegate = self
+        sidebarTableView.dataSource = self
+        sidebarTableView.register(UITableViewCell.self, forCellReuseIdentifier: "SidebarCell")
+        sidebarTableView.translatesAutoresizingMaskIntoConstraints = false
+        sidebarTableView.backgroundColor = .clear
+        sidebarTableView.separatorStyle = .none
+        sidebarTableView.rowHeight = 36
+        sidebarView.addSubview(sidebarTableView)
+
+        NSLayoutConstraint.activate([
+            sidebarTableView.topAnchor.constraint(equalTo: sidebarView.safeAreaLayoutGuide.topAnchor, constant: 8),
+            sidebarTableView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 12),
+            sidebarTableView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -12),
+            sidebarTableView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor)
+        ])
+    }
+
+    private func showDetailViewController(for item: SidebarItem) {
+        // Remove current detail VC
+        if let current = currentDetailVC {
+            current.willMove(toParent: nil)
+            current.view.removeFromSuperview()
+            current.removeFromParent()
         }
-    }
-}
 
-extension MainSplitController: SidebarViewControllerDelegate {
-    func sidebarDidSelect(item: MainSplitController.SidebarItem) {
         let viewController: UIViewController
-
         switch item {
         case .status:
             viewController = StatusViewController()
@@ -4422,62 +4445,38 @@ extension MainSplitController: SidebarViewControllerDelegate {
             viewController = LogViewController()
         }
 
-        currentDetailVC = viewController
-        let detailNav = UINavigationController(rootViewController: viewController)
-        detailNav.navigationBar.isHidden = true
-        setViewController(detailNav, for: .secondary)
-    }
-}
-
-protocol SidebarViewControllerDelegate: AnyObject {
-    func sidebarDidSelect(item: MainSplitController.SidebarItem)
-}
-
-class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
-    weak var delegate: SidebarViewControllerDelegate?
-
-    private let tableView = UITableView(frame: .zero, style: .plain)
-    private let items = MainSplitController.SidebarItem.allCases
-    var selectedIndex: Int = 0
-
-    func selectItem(_ item: MainSplitController.SidebarItem) {
-        guard let index = items.firstIndex(of: item) else { return }
-        selectedIndex = index
-        tableView.reloadData()
-        delegate?.sidebarDidSelect(item: item)
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-
-        view.backgroundColor = .clear
-
-        tableView.delegate = self
-        tableView.dataSource = self
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "SidebarCell")
-        tableView.translatesAutoresizingMaskIntoConstraints = false
-        tableView.backgroundColor = .clear
-        tableView.separatorStyle = .none
-        tableView.rowHeight = 36
-
-        view.addSubview(tableView)
+        // Add new detail VC
+        addChild(viewController)
+        viewController.view.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(viewController.view)
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            viewController.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+            viewController.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            viewController.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            viewController.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
+        viewController.didMove(toParent: self)
+        currentDetailVC = viewController
     }
 
+    func selectItem(_ item: SidebarItem) {
+        guard let index = SidebarItem.allCases.firstIndex(of: item) else { return }
+        selectedIndex = index
+        sidebarTableView.reloadData()
+        showDetailViewController(for: item)
+    }
+}
+
+extension MainSplitController: UITableViewDelegate, UITableViewDataSource {
     func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        items.count
+        SidebarItem.allCases.count
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "SidebarCell", for: indexPath)
-        let item = items[indexPath.row]
+        let item = SidebarItem.allCases[indexPath.row]
         let isSelected = indexPath.row == selectedIndex
 
         var config = cell.defaultContentConfiguration()
@@ -4515,7 +4514,7 @@ class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewD
         }
         tableView.reloadRows(at: indexPaths, with: .none)
 
-        delegate?.sidebarDidSelect(item: items[indexPath.row])
+        showDetailViewController(for: SidebarItem.allCases[indexPath.row])
     }
 }
 
