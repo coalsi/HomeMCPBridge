@@ -957,17 +957,14 @@ class AqaraPlugin: DevicePlugin {
 
     var accessToken: String? { credentials.retrieve(key: "accessToken", plugin: identifier) }
     var refreshToken: String? { credentials.retrieve(key: "refreshToken", plugin: identifier) }
-    var clientId: String? { credentials.retrieve(key: "clientId", plugin: identifier) }
-    var clientSecret: String? { credentials.retrieve(key: "clientSecret", plugin: identifier) }
 
     var isConfigured: Bool { accessToken != nil && !accessToken!.isEmpty }
 
     var configurationFields: [PluginConfigField] {
         [
-            PluginConfigField(key: "clientId", label: "Client ID", placeholder: "Aqara developer app ID", isSecure: false, helpText: "From developer.aqara.com"),
-            PluginConfigField(key: "clientSecret", label: "Client Secret", placeholder: "Aqara developer secret", isSecure: true, helpText: nil),
-            PluginConfigField(key: "authCode", label: "Authorization Code", placeholder: "Paste OAuth code here", isSecure: false, helpText: "Get from OAuth flow - see instructions"),
-            PluginConfigField(key: "region", label: "Region", placeholder: "us, eu, or cn", isSecure: false, helpText: "Your Aqara account region")
+            PluginConfigField(key: "accessToken", label: "Access Token", placeholder: "Paste access token here", isSecure: true, helpText: "From developer.aqara.com > Authorization management"),
+            PluginConfigField(key: "refreshToken", label: "Refresh Token", placeholder: "Paste refresh token here", isSecure: true, helpText: nil),
+            PluginConfigField(key: "region", label: "Region", placeholder: "us, eu, or cn", isSecure: false, helpText: "Your Aqara account region (cn for China)")
         ]
     }
 
@@ -981,90 +978,39 @@ class AqaraPlugin: DevicePlugin {
     func shutdown() async { cachedDevices = [] }
 
     func configure(with creds: [String: String]) async throws {
-        if let clientId = creds["clientId"], !clientId.isEmpty {
-            credentials.store(key: "clientId", value: clientId, plugin: identifier)
+        // Store access token directly
+        if let accessToken = creds["accessToken"], !accessToken.isEmpty {
+            credentials.store(key: "accessToken", value: accessToken, plugin: identifier)
         }
-        if let clientSecret = creds["clientSecret"], !clientSecret.isEmpty {
-            credentials.store(key: "clientSecret", value: clientSecret, plugin: identifier)
+        if let refreshToken = creds["refreshToken"], !refreshToken.isEmpty {
+            credentials.store(key: "refreshToken", value: refreshToken, plugin: identifier)
         }
         if let region = creds["region"], !region.isEmpty {
             credentials.store(key: "region", value: region, plugin: identifier)
         }
 
-        // If auth code provided, exchange for tokens
-        if let authCode = creds["authCode"], !authCode.isEmpty {
-            try await exchangeAuthCode(authCode)
+        // Validate the token works by fetching devices
+        if let _ = creds["accessToken"], !creds["accessToken"]!.isEmpty {
+            _ = try await fetchDevices()
+            log("Aqara: Token validated, found \(cachedDevices.count) devices")
         }
     }
 
     func clearCredentials() {
-        for key in ["accessToken", "refreshToken", "clientId", "clientSecret", "region", "tokenExpiry", "authCode"] {
+        for key in ["accessToken", "refreshToken", "region"] {
             credentials.delete(key: key, plugin: identifier)
         }
         cachedDevices = []
     }
 
-    // OAuth URL for user to authorize
-    func getOAuthURL() -> URL? {
-        guard let clientId = clientId else { return nil }
-        var components = URLComponents(string: "\(baseURL)/v3.0/open/authorize")!
-        components.queryItems = [
-            URLQueryItem(name: "client_id", value: clientId),
-            URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "redirect_uri", value: "homemcpbridge://oauth/aqara"),
-            URLQueryItem(name: "state", value: UUID().uuidString)
-        ]
-        return components.url
-    }
-
-    private func exchangeAuthCode(_ code: String) async throws {
-        guard let clientId = clientId, let clientSecret = clientSecret else {
-            throw PluginError.notConfigured
-        }
-
-        var request = URLRequest(url: URL(string: "\(baseURL)/v3.0/open/access_token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        let body = "grant_type=authorization_code&code=\(code)&client_id=\(clientId)&client_secret=\(clientSecret)&redirect_uri=homemcpbridge://oauth/aqara"
-        request.httpBody = body.data(using: .utf8)
-
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let response = try JSONDecoder().decode(AqaraTokenResponse.self, from: data)
-
-        storeTokens(response)
-        log("Aqara: Obtained access token")
-    }
-
-    private func storeTokens(_ response: AqaraTokenResponse) {
-        credentials.store(key: "accessToken", value: response.access_token, plugin: identifier)
-        credentials.store(key: "refreshToken", value: response.refresh_token, plugin: identifier)
-        let expiry = Date().addingTimeInterval(TimeInterval(response.expires_in))
-        credentials.store(key: "tokenExpiry", value: String(expiry.timeIntervalSince1970), plugin: identifier)
-    }
-
     private func refreshTokenIfNeeded() async throws {
-        if let expiryStr = credentials.retrieve(key: "tokenExpiry", plugin: identifier),
-           let expiry = TimeInterval(expiryStr),
-           Date().timeIntervalSince1970 < expiry - 3600 {
-            return // Token still valid
+        // With direct token entry, we just check if token exists
+        // User must manually refresh via Aqara console if token expires
+        guard accessToken != nil else {
+            throw PluginError.authenticationFailed("No access token configured")
         }
-
-        guard let refreshToken = refreshToken, let clientId = clientId, let clientSecret = clientSecret else {
-            throw PluginError.authenticationFailed("Missing refresh token or credentials")
-        }
-
-        var request = URLRequest(url: URL(string: "\(baseURL)/v3.0/open/access_token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        let body = "grant_type=refresh_token&refresh_token=\(refreshToken)&client_id=\(clientId)&client_secret=\(clientSecret)"
-        request.httpBody = body.data(using: .utf8)
-
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let response = try JSONDecoder().decode(AqaraTokenResponse.self, from: data)
-        storeTokens(response)
-        log("Aqara: Refreshed access token")
+        // Token refresh through API would require clientId/clientSecret
+        // which we're not collecting in simplified mode
     }
 
     func listDevices() async throws -> [UnifiedDevice] {
@@ -1141,12 +1087,6 @@ class AqaraPlugin: DevicePlugin {
 }
 
 // Aqara Models
-struct AqaraTokenResponse: Codable {
-    let access_token: String
-    let refresh_token: String
-    let expires_in: Int
-}
-
 struct AqaraDevice {
     let did: String
     let model: String
@@ -2080,8 +2020,13 @@ class DevicesViewController: UITableViewController {
         super.viewDidLoad()
         title = "Devices"
 
-        refreshControl = UIRefreshControl()
-        refreshControl?.addTarget(self, action: #selector(refresh), for: .valueChanged)
+        // Use toolbar button instead of UIRefreshControl (not supported on Mac Catalyst)
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            image: UIImage(systemName: "arrow.clockwise"),
+            style: .plain,
+            target: self,
+            action: #selector(refresh)
+        )
 
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "DeviceCell")
     }
@@ -2105,7 +2050,6 @@ class DevicesViewController: UITableViewController {
 
             await MainActor.run {
                 tableView.reloadData()
-                refreshControl?.endRefreshing()
             }
         }
     }
