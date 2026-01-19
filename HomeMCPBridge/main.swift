@@ -3587,10 +3587,8 @@ extension Notification.Name {
 // MARK: - Status View Controller
 
 class StatusViewController: UIViewController {
-    private var homeKitCountLabel: UILabel!
-    private var pluginsStackView: UIStackView!
-    private var menuBarSwitch: UISwitch!
-    private var dockSwitch: UISwitch!
+    private var sourcesStackView: UIStackView!
+    private var totalDevicesLabel: UILabel!
     private var linkedDevicesLabel: UILabel!
 
     override func viewDidLoad() {
@@ -3601,13 +3599,11 @@ class StatusViewController: UIViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(updateStatus), name: .homeKitUpdated, object: nil)
 
         updateStatus()
-        updatePluginStatus()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         updateStatus()
-        updatePluginStatus()
     }
 
     private func setupUI() {
@@ -3634,44 +3630,29 @@ class StatusViewController: UIViewController {
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(subtitleLabel)
 
-        // HomeKit Section (separate from plugins)
-        let homeKitHeader = UILabel()
-        homeKitHeader.text = "Apple HomeKit"
-        homeKitHeader.font = .boldSystemFont(ofSize: 16)
-        homeKitHeader.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(homeKitHeader)
+        // Total Devices Card
+        let totalCard = createTotalDevicesCard()
+        contentView.addSubview(totalCard)
 
-        homeKitCountLabel = UILabel()
-        homeKitCountLabel.font = .systemFont(ofSize: 14)
-        homeKitCountLabel.textColor = .systemGreen
-        homeKitCountLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(homeKitCountLabel)
+        // Device Sources Header
+        let sourcesHeader = UILabel()
+        sourcesHeader.text = "Device Sources"
+        sourcesHeader.font = .boldSystemFont(ofSize: 16)
+        sourcesHeader.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(sourcesHeader)
 
-        // Separator 1
-        let separator1 = UIView()
-        separator1.backgroundColor = .separator
-        separator1.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(separator1)
+        // Sources stack view (HomeKit + plugins all in same style)
+        sourcesStackView = UIStackView()
+        sourcesStackView.axis = .vertical
+        sourcesStackView.spacing = 8
+        sourcesStackView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(sourcesStackView)
 
-        // Plugins section header
-        let pluginsHeader = UILabel()
-        pluginsHeader.text = "Plugins"
-        pluginsHeader.font = .boldSystemFont(ofSize: 16)
-        pluginsHeader.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(pluginsHeader)
-
-        // Plugins stack view
-        pluginsStackView = UIStackView()
-        pluginsStackView.axis = .vertical
-        pluginsStackView.spacing = 6
-        pluginsStackView.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(pluginsStackView)
-
-        // Separator 2
-        let separator2 = UIView()
-        separator2.backgroundColor = .separator
-        separator2.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(separator2)
+        // Separator
+        let separator = UIView()
+        separator.backgroundColor = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(separator)
 
         // Linked Devices Info
         let linkedHeader = UILabel()
@@ -3686,61 +3667,6 @@ class StatusViewController: UIViewController {
         linkedDevicesLabel.numberOfLines = 0
         linkedDevicesLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(linkedDevicesLabel)
-
-        // Separator 3
-        let separator3 = UIView()
-        separator3.backgroundColor = .separator
-        separator3.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(separator3)
-
-        // Settings section header
-        let settingsHeader = UILabel()
-        settingsHeader.text = "Settings"
-        settingsHeader.font = .boldSystemFont(ofSize: 16)
-        settingsHeader.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(settingsHeader)
-
-        // Menu bar toggle
-        let menuBarLabel = UILabel()
-        menuBarLabel.text = "Show Menu Bar Icon"
-        menuBarLabel.font = .systemFont(ofSize: 14)
-        menuBarLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(menuBarLabel)
-
-        menuBarSwitch = UISwitch()
-        menuBarSwitch.isOn = SettingsManager.shared.showMenuBarIcon
-        menuBarSwitch.addTarget(self, action: #selector(menuBarSwitchChanged), for: .valueChanged)
-        menuBarSwitch.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(menuBarSwitch)
-
-        // Dock toggle
-        let dockLabel = UILabel()
-        dockLabel.text = "Show Dock Icon"
-        dockLabel.font = .systemFont(ofSize: 14)
-        dockLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(dockLabel)
-
-        dockSwitch = UISwitch()
-        dockSwitch.isOn = SettingsManager.shared.showDockIcon
-        dockSwitch.addTarget(self, action: #selector(dockSwitchChanged), for: .valueChanged)
-        dockSwitch.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(dockSwitch)
-
-        // Settings note
-        let settingsNote = UILabel()
-        settingsNote.text = "Note: At least one must be enabled."
-        settingsNote.font = .systemFont(ofSize: 11)
-        settingsNote.textColor = .secondaryLabel
-        settingsNote.numberOfLines = 0
-        settingsNote.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(settingsNote)
-
-        // Login items button
-        let loginButton = UIButton(type: .system)
-        loginButton.setTitle("Add to Login Items...", for: .normal)
-        loginButton.addTarget(self, action: #selector(openLoginItems), for: .touchUpInside)
-        loginButton.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(loginButton)
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
@@ -3760,190 +3686,225 @@ class StatusViewController: UIViewController {
             subtitleLabel.topAnchor.constraint(equalTo: headerLabel.bottomAnchor, constant: 4),
             subtitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
 
-            homeKitHeader.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 24),
-            homeKitHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            totalCard.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 20),
+            totalCard.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            totalCard.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            homeKitCountLabel.topAnchor.constraint(equalTo: homeKitHeader.bottomAnchor, constant: 4),
-            homeKitCountLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            sourcesHeader.topAnchor.constraint(equalTo: totalCard.bottomAnchor, constant: 24),
+            sourcesHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
 
-            separator1.topAnchor.constraint(equalTo: homeKitCountLabel.bottomAnchor, constant: 16),
-            separator1.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            separator1.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            separator1.heightAnchor.constraint(equalToConstant: 1),
+            sourcesStackView.topAnchor.constraint(equalTo: sourcesHeader.bottomAnchor, constant: 12),
+            sourcesStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            sourcesStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            pluginsHeader.topAnchor.constraint(equalTo: separator1.bottomAnchor, constant: 16),
-            pluginsHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            separator.topAnchor.constraint(equalTo: sourcesStackView.bottomAnchor, constant: 20),
+            separator.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            separator.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            separator.heightAnchor.constraint(equalToConstant: 1),
 
-            pluginsStackView.topAnchor.constraint(equalTo: pluginsHeader.bottomAnchor, constant: 8),
-            pluginsStackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            pluginsStackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            separator2.topAnchor.constraint(equalTo: pluginsStackView.bottomAnchor, constant: 16),
-            separator2.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            separator2.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            separator2.heightAnchor.constraint(equalToConstant: 1),
-
-            linkedHeader.topAnchor.constraint(equalTo: separator2.bottomAnchor, constant: 16),
+            linkedHeader.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 16),
             linkedHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
 
             linkedDevicesLabel.topAnchor.constraint(equalTo: linkedHeader.bottomAnchor, constant: 4),
             linkedDevicesLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             linkedDevicesLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            separator3.topAnchor.constraint(equalTo: linkedDevicesLabel.bottomAnchor, constant: 16),
-            separator3.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            separator3.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            separator3.heightAnchor.constraint(equalToConstant: 1),
-
-            settingsHeader.topAnchor.constraint(equalTo: separator3.bottomAnchor, constant: 16),
-            settingsHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-
-            menuBarLabel.topAnchor.constraint(equalTo: settingsHeader.bottomAnchor, constant: 12),
-            menuBarLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-
-            menuBarSwitch.centerYAnchor.constraint(equalTo: menuBarLabel.centerYAnchor),
-            menuBarSwitch.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            dockLabel.topAnchor.constraint(equalTo: menuBarLabel.bottomAnchor, constant: 12),
-            dockLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-
-            dockSwitch.centerYAnchor.constraint(equalTo: dockLabel.centerYAnchor),
-            dockSwitch.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            settingsNote.topAnchor.constraint(equalTo: dockLabel.bottomAnchor, constant: 8),
-            settingsNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            settingsNote.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            loginButton.topAnchor.constraint(equalTo: settingsNote.bottomAnchor, constant: 12),
-            loginButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            loginButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
+            linkedDevicesLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
         ])
     }
 
-    @objc private func menuBarSwitchChanged() {
-        if !menuBarSwitch.isOn && !dockSwitch.isOn {
-            menuBarSwitch.isOn = true
-            return
-        }
-        SettingsManager.shared.showMenuBarIcon = menuBarSwitch.isOn
-        #if targetEnvironment(macCatalyst)
-        MenuBarManager.shared.updateVisibility()
-        #endif
+    private func createTotalDevicesCard() -> UIView {
+        let card = UIView()
+        card.backgroundColor = .systemBlue
+        card.layer.cornerRadius = 12
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = UIImageView(image: UIImage(systemName: "square.grid.2x2.fill"))
+        iconView.tintColor = .white
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(iconView)
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Total Devices"
+        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        titleLabel.textColor = .white.withAlphaComponent(0.9)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(titleLabel)
+
+        totalDevicesLabel = UILabel()
+        totalDevicesLabel.text = "0"
+        totalDevicesLabel.font = .systemFont(ofSize: 36, weight: .bold)
+        totalDevicesLabel.textColor = .white
+        totalDevicesLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(totalDevicesLabel)
+
+        let subtitleLabel = UILabel()
+        subtitleLabel.text = "across all sources"
+        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.textColor = .white.withAlphaComponent(0.8)
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(subtitleLabel)
+
+        NSLayoutConstraint.activate([
+            card.heightAnchor.constraint(equalToConstant: 100),
+
+            iconView.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            iconView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            iconView.widthAnchor.constraint(equalToConstant: 28),
+            iconView.heightAnchor.constraint(equalToConstant: 28),
+
+            titleLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+
+            totalDevicesLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            totalDevicesLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+
+            subtitleLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16),
+            subtitleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16)
+        ])
+
+        return card
     }
 
-    @objc private func dockSwitchChanged() {
-        if !dockSwitch.isOn && !menuBarSwitch.isOn {
-            dockSwitch.isOn = true
-            return
-        }
-        SettingsManager.shared.showDockIcon = dockSwitch.isOn
-        #if targetEnvironment(macCatalyst)
-        MenuBarManager.shared.updateDockVisibility()
-        #endif
-    }
+    private func createSourceCard(name: String, icon: String, deviceCount: Int, status: String, statusColor: UIColor, isHomeKit: Bool = false) -> UIView {
+        let card = UIView()
+        card.backgroundColor = .secondarySystemGroupedBackground
+        card.layer.cornerRadius = 10
+        card.translatesAutoresizingMaskIntoConstraints = false
 
-    @objc private func openLoginItems() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
-            UIApplication.shared.open(url)
-        }
+        let iconView = UIImageView(image: UIImage(systemName: icon))
+        iconView.tintColor = isHomeKit ? .systemOrange : .systemBlue
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(iconView)
+
+        let nameLabel = UILabel()
+        nameLabel.text = name
+        nameLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(nameLabel)
+
+        let countLabel = UILabel()
+        countLabel.text = "\(deviceCount) devices"
+        countLabel.font = .systemFont(ofSize: 13)
+        countLabel.textColor = .secondaryLabel
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(countLabel)
+
+        let statusLabel = UILabel()
+        statusLabel.text = status
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = statusColor
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(statusLabel)
+
+        NSLayoutConstraint.activate([
+            card.heightAnchor.constraint(equalToConstant: 60),
+
+            iconView.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            iconView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            iconView.widthAnchor.constraint(equalToConstant: 24),
+            iconView.heightAnchor.constraint(equalToConstant: 24),
+
+            nameLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+
+            countLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 2),
+            countLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+
+            statusLabel.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14)
+        ])
+
+        return card
     }
 
     @objc private func updateStatus() {
+        // Clear existing source cards
+        sourcesStackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        var totalDevices = 0
+
+        // HomeKit source
         let homeKit = HomeKitManager.shared
-        homeKitCountLabel.text = "\(homeKit.deviceCount) devices in \(homeKit.homeCount) home(s) - Active"
+        let homeKitCount = homeKit.deviceCount
+        totalDevices += homeKitCount
 
-        let links = DeviceLinkManager.shared.getAllLinks()
-        if links.isEmpty {
-            linkedDevicesLabel.text = "No devices linked. Tap (i) on a device to link it with a device from another source."
-        } else {
-            linkedDevicesLabel.text = "\(links.count) device link(s) configured"
-        }
-    }
+        let homeKitCard = createSourceCard(
+            name: "Apple HomeKit",
+            icon: "homekit",
+            deviceCount: homeKitCount,
+            status: "Active",
+            statusColor: .systemGreen,
+            isHomeKit: true
+        )
+        sourcesStackView.addArrangedSubview(homeKitCard)
 
-    private func updatePluginStatus() {
-        pluginsStackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
-
-        // Only show non-HomeKit plugins
+        // Plugin sources
         let plugins = PluginManager.shared.allPlugins().filter { $0.identifier != "homekit" }
+        for plugin in plugins {
+            let isActive = plugin.isEnabled && plugin.isConfigured
+            let status: String
+            let statusColor: UIColor
 
-        if plugins.isEmpty {
-            let noPluginsLabel = UILabel()
-            noPluginsLabel.text = "No plugins configured"
-            noPluginsLabel.font = .systemFont(ofSize: 14)
-            noPluginsLabel.textColor = .secondaryLabel
-            pluginsStackView.addArrangedSubview(noPluginsLabel)
-        } else {
-            for plugin in plugins {
-                let row = createPluginRow(plugin: plugin)
-                pluginsStackView.addArrangedSubview(row)
+            if isActive {
+                status = "Active"
+                statusColor = .systemGreen
+            } else if plugin.isEnabled && !plugin.isConfigured {
+                status = "Not Configured"
+                statusColor = .systemOrange
+            } else {
+                status = "Disabled"
+                statusColor = .secondaryLabel
             }
-        }
-    }
 
-    private func createPluginRow(plugin: any DevicePlugin) -> UIView {
-        let container = UIView()
-        container.translatesAutoresizingMaskIntoConstraints = false
+            // Create card with 0 devices initially
+            let card = createSourceCard(
+                name: plugin.displayName,
+                icon: "puzzlepiece.extension.fill",
+                deviceCount: 0,
+                status: status,
+                statusColor: statusColor
+            )
+            sourcesStackView.addArrangedSubview(card)
 
-        let nameLabel = UILabel()
-        nameLabel.text = plugin.displayName
-        nameLabel.font = .systemFont(ofSize: 14)
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(nameLabel)
+            // Update device count asynchronously if active
+            if isActive {
+                Task {
+                    if let devices = try? await plugin.listDevices() {
+                        await MainActor.run {
+                            totalDevices += devices.count
+                            self.totalDevicesLabel.text = "\(totalDevices)"
 
-        let countLabel = UILabel()
-        countLabel.font = .systemFont(ofSize: 12)
-        countLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(countLabel)
-
-        let statusLabel = UILabel()
-        let isActive = plugin.isEnabled && plugin.isConfigured
-        if isActive {
-            statusLabel.text = "Active"
-            statusLabel.textColor = .systemGreen
-
-            // Get device count asynchronously
-            Task {
-                if let devices = try? await plugin.listDevices() {
-                    await MainActor.run {
-                        countLabel.text = "\(devices.count) devices"
-                        countLabel.textColor = .secondaryLabel
+                            // Update the count label in the card
+                            if let countLabel = card.subviews.compactMap({ $0 as? UILabel }).first(where: { $0.text?.contains("devices") == true }) {
+                                countLabel.text = "\(devices.count) devices"
+                            }
+                        }
                     }
                 }
             }
-        } else if plugin.isEnabled && !plugin.isConfigured {
-            statusLabel.text = "Not Configured"
-            statusLabel.textColor = .systemOrange
-        } else {
-            statusLabel.text = "Disabled"
-            statusLabel.textColor = .secondaryLabel
         }
-        statusLabel.font = .systemFont(ofSize: 12)
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(statusLabel)
 
-        NSLayoutConstraint.activate([
-            nameLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            nameLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        totalDevicesLabel.text = "\(totalDevices)"
 
-            countLabel.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 8),
-
-            statusLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            statusLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            countLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-
-            container.heightAnchor.constraint(equalToConstant: 28)
-        ])
-
-        return container
+        // Device links
+        let links = DeviceLinkManager.shared.getAllLinks()
+        if links.isEmpty {
+            linkedDevicesLabel.text = "No devices linked. Tap (i) on a device in the Devices tab to link it with a device from another source."
+        } else {
+            linkedDevicesLabel.text = "\(links.count) device link(s) configured"
+        }
     }
 }
 
 // MARK: - Setup View Controller
 
 class SetupViewController: UIViewController {
+    private var menuBarSwitch: UISwitch?
+    private var dockSwitch: UISwitch?
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Setup"
+        title = "Settings"
         view.backgroundColor = .systemBackground
         setupUI()
     }
@@ -4173,8 +4134,77 @@ Linked devices use the most capable source automatically (plugins usually have m
         NSLayoutConstraint.activate([
             linkDesc.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 8),
             linkDesc.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
-            linkDesc.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
-            linkDesc.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -padding)
+            linkDesc.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding)
+        ])
+        lastView = linkDesc
+
+        // Separator
+        let sep5 = createSeparator()
+        contentView.addSubview(sep5)
+        NSLayoutConstraint.activate([
+            sep5.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 16),
+            sep5.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            sep5.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
+            sep5.heightAnchor.constraint(equalToConstant: 1)
+        ])
+        lastView = sep5
+
+        // App Settings Section
+        let appSettingsHeader = createSectionHeader("App Settings")
+        contentView.addSubview(appSettingsHeader)
+        NSLayoutConstraint.activate([
+            appSettingsHeader.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 16),
+            appSettingsHeader.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding)
+        ])
+        lastView = appSettingsHeader
+
+        // Menu bar toggle
+        let menuBarRow = createSettingRow(title: "Show Menu Bar Icon", isOn: SettingsManager.shared.showMenuBarIcon, action: #selector(menuBarSwitchChanged(_:)))
+        contentView.addSubview(menuBarRow)
+        NSLayoutConstraint.activate([
+            menuBarRow.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 12),
+            menuBarRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            menuBarRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
+            menuBarRow.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        lastView = menuBarRow
+        menuBarSwitch = menuBarRow.subviews.compactMap { $0 as? UISwitch }.first
+
+        // Dock toggle
+        let dockRow = createSettingRow(title: "Show Dock Icon", isOn: SettingsManager.shared.showDockIcon, action: #selector(dockSwitchChanged(_:)))
+        contentView.addSubview(dockRow)
+        NSLayoutConstraint.activate([
+            dockRow.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 8),
+            dockRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            dockRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
+            dockRow.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        lastView = dockRow
+        dockSwitch = dockRow.subviews.compactMap { $0 as? UISwitch }.first
+
+        // Settings note
+        let settingsNote = UILabel()
+        settingsNote.text = "Note: At least one must be enabled."
+        settingsNote.font = .systemFont(ofSize: 12)
+        settingsNote.textColor = .secondaryLabel
+        settingsNote.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(settingsNote)
+        NSLayoutConstraint.activate([
+            settingsNote.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 8),
+            settingsNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding)
+        ])
+        lastView = settingsNote
+
+        // Login items button
+        let loginButton = UIButton(type: .system)
+        loginButton.setTitle("Open Login Items Settings...", for: .normal)
+        loginButton.addTarget(self, action: #selector(openLoginItems), for: .touchUpInside)
+        loginButton.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(loginButton)
+        NSLayoutConstraint.activate([
+            loginButton.topAnchor.constraint(equalTo: lastView.bottomAnchor, constant: 12),
+            loginButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: padding),
+            loginButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -padding)
         ])
 
         NSLayoutConstraint.activate([
@@ -4247,6 +4277,63 @@ Linked devices use the most capable source automatically (plugins usually have m
         let alert = UIAlertController(title: "Copied", message: "MCP configuration copied to clipboard", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
+    }
+
+    private func createSettingRow(title: String, isOn: Bool, action: Selector) -> UIView {
+        let row = UIView()
+        row.backgroundColor = .secondarySystemGroupedBackground
+        row.layer.cornerRadius = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = UILabel()
+        label.text = title
+        label.font = .systemFont(ofSize: 15)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+
+        let toggle = UISwitch()
+        toggle.isOn = isOn
+        toggle.addTarget(self, action: action, for: .valueChanged)
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(toggle)
+
+        NSLayoutConstraint.activate([
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
+
+            toggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            toggle.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -16)
+        ])
+
+        return row
+    }
+
+    @objc private func menuBarSwitchChanged(_ sender: UISwitch) {
+        if !sender.isOn && !(dockSwitch?.isOn ?? true) {
+            sender.isOn = true
+            return
+        }
+        SettingsManager.shared.showMenuBarIcon = sender.isOn
+        #if targetEnvironment(macCatalyst)
+        MenuBarManager.shared.updateVisibility()
+        #endif
+    }
+
+    @objc private func dockSwitchChanged(_ sender: UISwitch) {
+        if !sender.isOn && !(menuBarSwitch?.isOn ?? true) {
+            sender.isOn = true
+            return
+        }
+        SettingsManager.shared.showDockIcon = sender.isOn
+        #if targetEnvironment(macCatalyst)
+        MenuBarManager.shared.updateDockVisibility()
+        #endif
+    }
+
+    @objc private func openLoginItems() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+            UIApplication.shared.open(url)
+        }
     }
 }
 
@@ -4436,7 +4523,10 @@ class MainSplitController: UIViewController {
         case .devices:
             viewController = DevicesViewController()
         case .plugins:
-            viewController = PluginsViewController()
+            // Wrap in nav controller so plugin config can be pushed
+            let pluginsVC = PluginsViewController()
+            let navController = UINavigationController(rootViewController: pluginsVC)
+            viewController = navController
         case .mcpPost:
             viewController = MCPPostViewController()
         case .settings:
