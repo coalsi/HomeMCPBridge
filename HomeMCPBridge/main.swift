@@ -4324,7 +4324,7 @@ class LogViewController: UIViewController {
 
 // MARK: - Main Split Controller (Finder-style sidebar)
 
-class MainSplitController: UISplitViewController, UISplitViewControllerDelegate {
+class MainSplitController: UISplitViewController {
 
     enum SidebarItem: String, CaseIterable {
         case status = "Status"
@@ -4347,40 +4347,45 @@ class MainSplitController: UISplitViewController, UISplitViewControllerDelegate 
     }
 
     private var sidebarViewController: SidebarViewController!
+    private var currentDetailVC: UIViewController?
+
+    init() {
+        super.init(style: .doubleColumn)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Configure split view style
+        // Configure for Mac Catalyst
+        primaryBackgroundStyle = .sidebar
         preferredDisplayMode = .oneBesideSecondary
-        presentsWithGesture = false
-        delegate = self
+        preferredSplitBehavior = .tile
 
-        // Primary minimum width (sidebar)
-        preferredPrimaryColumnWidthFraction = 0.25
-        minimumPrimaryColumnWidth = 180
-        maximumPrimaryColumnWidth = 250
+        // Column widths
+        preferredPrimaryColumnWidthFraction = 0.22
+        minimumPrimaryColumnWidth = 200
+        maximumPrimaryColumnWidth = 280
 
         // Create sidebar
         sidebarViewController = SidebarViewController()
         sidebarViewController.delegate = self
 
-        // Create initial detail view
+        // Set sidebar as primary
+        setViewController(sidebarViewController, for: .primary)
+
+        // Set initial detail view
         let statusVC = StatusViewController()
-        let detailNav = UINavigationController(rootViewController: statusVC)
-
-        // Set view controllers
-        viewControllers = [sidebarViewController, detailNav]
-    }
-
-    func splitViewController(_ svc: UISplitViewController, topColumnForCollapsingToProposedTopColumn proposedTopColumn: UISplitViewController.Column) -> UISplitViewController.Column {
-        return .primary
+        currentDetailVC = statusVC
+        setViewController(statusVC, for: .secondary)
     }
 
     // Select a sidebar item programmatically
     func selectItem(_ item: SidebarItem) {
         sidebarViewController.selectItem(item)
-        sidebarDidSelect(item: item)
     }
 
     // Compatibility property for old tab-based code
@@ -4414,8 +4419,8 @@ extension MainSplitController: SidebarViewControllerDelegate {
             viewController = LogViewController()
         }
 
-        let detailNav = UINavigationController(rootViewController: viewController)
-        showDetailViewController(detailNav, sender: self)
+        currentDetailVC = viewController
+        setViewController(viewController, for: .secondary)
     }
 }
 
@@ -4426,23 +4431,21 @@ protocol SidebarViewControllerDelegate: AnyObject {
 class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
     weak var delegate: SidebarViewControllerDelegate?
 
-    private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+    private let tableView = UITableView(frame: .zero, style: .plain)
     private let items = MainSplitController.SidebarItem.allCases
     var selectedIndex: Int = 0
 
     func selectItem(_ item: MainSplitController.SidebarItem) {
         guard let index = items.firstIndex(of: item) else { return }
-        let indexPath = IndexPath(row: index, section: 0)
-        tableView(tableView, didSelectRowAt: indexPath)
+        selectedIndex = index
+        tableView.reloadData()
+        delegate?.sidebarDidSelect(item: item)
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        title = "HomeMCPBridge"
-        navigationController?.navigationBar.prefersLargeTitles = false
-
-        view.backgroundColor = .systemGroupedBackground
+        view.backgroundColor = .clear
 
         tableView.delegate = self
         tableView.dataSource = self
@@ -4450,17 +4453,15 @@ class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewD
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.backgroundColor = .clear
         tableView.separatorStyle = .none
+        tableView.rowHeight = 36
 
         view.addSubview(tableView)
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
-
-        // Select first item by default
-        tableView.selectRow(at: IndexPath(row: 0, section: 0), animated: false, scrollPosition: .none)
     }
 
     func numberOfSections(in tableView: UITableView) -> Int { 1 }
@@ -4472,25 +4473,28 @@ class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewD
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "SidebarCell", for: indexPath)
         let item = items[indexPath.row]
+        let isSelected = indexPath.row == selectedIndex
 
         var config = cell.defaultContentConfiguration()
         config.text = item.rawValue
         config.image = item.icon
-        config.imageProperties.tintColor = indexPath.row == selectedIndex ? .white : .systemBlue
+        config.textProperties.font = .systemFont(ofSize: 13, weight: .medium)
+        config.imageProperties.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)
 
-        if indexPath.row == selectedIndex {
+        if isSelected {
             config.textProperties.color = .white
+            config.imageProperties.tintColor = .white
             cell.backgroundColor = .systemBlue
-            cell.layer.cornerRadius = 8
-            cell.layer.masksToBounds = true
         } else {
             config.textProperties.color = .label
+            config.imageProperties.tintColor = .systemBlue
             cell.backgroundColor = .clear
-            cell.layer.cornerRadius = 0
         }
 
         cell.contentConfiguration = config
         cell.selectionStyle = .none
+        cell.layer.cornerRadius = 6
+        cell.layer.masksToBounds = true
 
         return cell
     }
@@ -4499,7 +4503,7 @@ class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewD
         let previousIndex = selectedIndex
         selectedIndex = indexPath.row
 
-        // Reload affected cells to update selection appearance
+        // Reload affected cells
         var indexPaths = [indexPath]
         if previousIndex != selectedIndex {
             indexPaths.append(IndexPath(row: previousIndex, section: 0))
@@ -4507,10 +4511,6 @@ class SidebarViewController: UIViewController, UITableViewDelegate, UITableViewD
         tableView.reloadRows(at: indexPaths, with: .none)
 
         delegate?.sidebarDidSelect(item: items[indexPath.row])
-    }
-
-    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        44
     }
 }
 
