@@ -107,6 +107,160 @@ Once configured, you can ask your AI things like:
 - **Thermostats** - Read temperature (control coming soon)
 - **Sensors** - Read values
 
+---
+
+## Plugin System
+
+HomeMCPBridge v2.0 introduces a plugin architecture that allows integration with third-party smart home platforms beyond Apple HomeKit.
+
+### Built-in Plugins
+
+| Plugin | Authentication | Description |
+|--------|----------------|-------------|
+| **Apple HomeKit** | Native (always enabled) | Direct access to HomeKit devices via Apple's framework |
+| **Govee** | API Key | Control Govee smart lights and appliances |
+| **Aqara** | OAuth 2.0 | Control Aqara sensors, switches, and smart home devices |
+
+### Configuring Plugins
+
+1. Open HomeMCPBridge
+2. Go to the **Plugins** tab
+3. Tap on a plugin to configure credentials
+4. Toggle the switch to enable/disable the plugin
+
+### Govee Setup
+
+1. Open the Govee Home app on your phone
+2. Go to **Settings > About Us > Apply for API Key**
+3. Wait for approval (usually within a few days)
+4. Once approved, copy your API key
+5. In HomeMCPBridge, go to **Plugins > Govee** and enter your API key
+6. Enable the Govee plugin
+
+### Aqara Setup
+
+1. Register as a developer at [developer.aqara.com](https://developer.aqara.com)
+2. Create an application to get your Client ID and Client Secret
+3. In HomeMCPBridge, go to **Plugins > Aqara**
+4. Enter your Client ID, Client Secret, and region (us, eu, or cn)
+5. Complete the OAuth authorization flow
+6. Enable the Aqara plugin
+
+### Devices Tab
+
+The new **Devices** tab shows all devices from all enabled plugins, organized by source:
+- See device names, types, rooms, and reachability status
+- Pull-to-refresh to update the device list
+- Devices are grouped by HomeKit, Govee, Aqara, etc.
+
+---
+
+## Plugin Development Guide
+
+Want to add support for another smart home platform? Here's how to create a custom plugin.
+
+### Plugin Protocol
+
+All plugins must conform to the `DevicePlugin` protocol:
+
+```swift
+protocol DevicePlugin: AnyObject {
+    var identifier: String { get }        // Unique ID (e.g., "myplatform")
+    var displayName: String { get }       // UI display name
+    var isEnabled: Bool { get set }       // Whether plugin is active
+    var isConfigured: Bool { get }        // Whether credentials are set
+    var configurationFields: [PluginConfigField] { get }  // UI config fields
+
+    func initialize() async throws        // Called when enabled
+    func shutdown() async                 // Called when disabled
+    func listDevices() async throws -> [UnifiedDevice]
+    func getDeviceState(deviceId: String) async throws -> [String: Any]
+    func controlDevice(deviceId: String, action: String, value: Any?) async throws -> ControlResult
+    func configure(with credentials: [String: String]) async throws
+    func clearCredentials()
+}
+```
+
+### Example Plugin Structure
+
+```swift
+class MyPlatformPlugin: DevicePlugin {
+    let identifier = "myplatform"
+    let displayName = "My Platform"
+    var isEnabled = false
+
+    var isConfigured: Bool {
+        CredentialManager.shared.retrieve(key: "apiKey", plugin: identifier) != nil
+    }
+
+    var configurationFields: [PluginConfigField] {
+        [PluginConfigField(
+            key: "apiKey",
+            label: "API Key",
+            placeholder: "Enter your API key",
+            isSecure: true,
+            helpText: "Get your API key from myplatform.com"
+        )]
+    }
+
+    func initialize() async throws {
+        guard isConfigured else { throw PluginError.notConfigured }
+        // Validate credentials and cache device list
+    }
+
+    func listDevices() async throws -> [UnifiedDevice] {
+        // Fetch devices from your platform's API
+        // Return as UnifiedDevice objects
+    }
+
+    // Implement remaining methods...
+}
+```
+
+### Registering Your Plugin
+
+Add your plugin to the AppDelegate:
+
+```swift
+func application(_ application: UIApplication, didFinishLaunchingWithOptions...) {
+    // ...
+    PluginManager.shared.register(MyPlatformPlugin())
+    // ...
+}
+```
+
+### UnifiedDevice Model
+
+All plugins return devices using a common format:
+
+```swift
+struct UnifiedDevice {
+    let id: String           // Unique device identifier
+    let name: String         // Display name
+    let room: String?        // Room location (optional)
+    let type: String         // Device type: light, switch, outlet, fan, lock, etc.
+    let source: DeviceSource // Which plugin owns this device
+    let isReachable: Bool    // Is device online?
+    let manufacturer: String?
+    let model: String?
+}
+```
+
+### Secure Credential Storage
+
+Use `CredentialManager` for secure Keychain storage:
+
+```swift
+// Store a credential
+CredentialManager.shared.store(key: "apiKey", value: "secret123", plugin: "myplatform")
+
+// Retrieve a credential
+let key = CredentialManager.shared.retrieve(key: "apiKey", plugin: "myplatform")
+
+// Delete a credential
+CredentialManager.shared.delete(key: "apiKey", plugin: "myplatform")
+```
+
 ## Privacy
 
 HomeMCPBridge:
