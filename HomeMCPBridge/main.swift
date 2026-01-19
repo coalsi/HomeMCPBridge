@@ -1,6 +1,7 @@
 import Foundation
 import HomeKit
 import UIKit
+import CommonCrypto
 
 #if targetEnvironment(macCatalyst)
 import AppKit
@@ -957,12 +958,23 @@ class AqaraPlugin: DevicePlugin {
 
     var accessToken: String? { credentials.retrieve(key: "accessToken", plugin: identifier) }
     var refreshToken: String? { credentials.retrieve(key: "refreshToken", plugin: identifier) }
+    var appId: String? { credentials.retrieve(key: "appId", plugin: identifier) }
+    var keyId: String? { credentials.retrieve(key: "keyId", plugin: identifier) }
+    var appKey: String? { credentials.retrieve(key: "appKey", plugin: identifier) }
 
-    var isConfigured: Bool { accessToken != nil && !accessToken!.isEmpty }
+    var isConfigured: Bool {
+        accessToken != nil && !accessToken!.isEmpty &&
+        appId != nil && !appId!.isEmpty &&
+        keyId != nil && !keyId!.isEmpty &&
+        appKey != nil && !appKey!.isEmpty
+    }
 
     var configurationFields: [PluginConfigField] {
         [
-            PluginConfigField(key: "accessToken", label: "Access Token", placeholder: "Paste access token here", isSecure: true, helpText: "From developer.aqara.com > Authorization management"),
+            PluginConfigField(key: "appId", label: "App ID", placeholder: "Your Aqara App ID", isSecure: false, helpText: "From developer.aqara.com > Your Project"),
+            PluginConfigField(key: "keyId", label: "Key ID", placeholder: "Keyid from your project", isSecure: false, helpText: "Found under App Key in project details"),
+            PluginConfigField(key: "appKey", label: "App Key", placeholder: "Your App Key/Secret", isSecure: true, helpText: "The secret key for signing requests"),
+            PluginConfigField(key: "accessToken", label: "Access Token", placeholder: "Paste access token here", isSecure: true, helpText: "From Authorization management"),
             PluginConfigField(key: "refreshToken", label: "Refresh Token", placeholder: "Paste refresh token here", isSecure: true, helpText: nil),
             PluginConfigField(key: "region", label: "Region", placeholder: "us, eu, or cn", isSecure: false, helpText: "Your Aqara account region (cn for China)")
         ]
@@ -978,7 +990,16 @@ class AqaraPlugin: DevicePlugin {
     func shutdown() async { cachedDevices = [] }
 
     func configure(with creds: [String: String]) async throws {
-        // Store access token directly
+        // Store all credentials
+        if let appId = creds["appId"], !appId.isEmpty {
+            credentials.store(key: "appId", value: appId, plugin: identifier)
+        }
+        if let keyId = creds["keyId"], !keyId.isEmpty {
+            credentials.store(key: "keyId", value: keyId, plugin: identifier)
+        }
+        if let appKey = creds["appKey"], !appKey.isEmpty {
+            credentials.store(key: "appKey", value: appKey, plugin: identifier)
+        }
         if let accessToken = creds["accessToken"], !accessToken.isEmpty {
             credentials.store(key: "accessToken", value: accessToken, plugin: identifier)
         }
@@ -989,18 +1010,57 @@ class AqaraPlugin: DevicePlugin {
             credentials.store(key: "region", value: region, plugin: identifier)
         }
 
-        // Validate the token works by fetching devices
-        if let _ = creds["accessToken"], !creds["accessToken"]!.isEmpty {
+        // Validate the credentials work by fetching devices
+        if isConfigured {
             _ = try await fetchDevices()
-            log("Aqara: Token validated, found \(cachedDevices.count) devices")
+            log("Aqara: Credentials validated, found \(cachedDevices.count) devices")
         }
     }
 
     func clearCredentials() {
-        for key in ["accessToken", "refreshToken", "region"] {
+        for key in ["accessToken", "refreshToken", "region", "appId", "keyId", "appKey"] {
             credentials.delete(key: key, plugin: identifier)
         }
         cachedDevices = []
+    }
+
+    // MARK: - Signature Generation
+
+    private func generateNonce() -> String {
+        let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        return String((0..<16).map { _ in chars.randomElement()! })
+    }
+
+    private func generateSignature(accessToken: String?, appId: String, keyId: String, appKey: String, nonce: String, time: String) -> String {
+        // Build the string to sign (sorted by ASCII, lowercase keys)
+        var params: [(String, String)] = [
+            ("appid", appId),
+            ("keyid", keyId),
+            ("nonce", nonce),
+            ("time", time)
+        ]
+
+        // Add accesstoken if present
+        if let token = accessToken, !token.isEmpty {
+            params.append(("accesstoken", token))
+        }
+
+        // Sort by key (ASCII order)
+        params.sort { $0.0 < $1.0 }
+
+        // Build param string
+        let paramString = params.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
+
+        // Append appKey and lowercase everything
+        let stringToSign = (paramString + appKey).lowercased()
+
+        // MD5 hash
+        let data = Data(stringToSign.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        _ = data.withUnsafeBytes {
+            CC_MD5($0.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func refreshTokenIfNeeded() async throws {
@@ -1064,24 +1124,62 @@ class AqaraPlugin: DevicePlugin {
     }
 
     private func fetchDevices() async throws -> [AqaraDevice] {
-        guard let accessToken = accessToken else { throw PluginError.notConfigured }
+        guard let accessToken = accessToken,
+              let appId = appId,
+              let keyId = keyId,
+              let appKey = appKey else {
+            throw PluginError.notConfigured
+        }
+
+        let nonce = generateNonce()
+        let time = String(Int(Date().timeIntervalSince1970 * 1000))
+        let sign = generateSignature(accessToken: accessToken, appId: appId, keyId: keyId, appKey: appKey, nonce: nonce, time: time)
 
         var request = URLRequest(url: URL(string: "\(baseURL)/v3.0/open/api")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(accessToken, forHTTPHeaderField: "Accesstoken")
+        request.setValue(appId, forHTTPHeaderField: "Appid")
+        request.setValue(keyId, forHTTPHeaderField: "Keyid")
+        request.setValue(nonce, forHTTPHeaderField: "Nonce")
+        request.setValue(time, forHTTPHeaderField: "Time")
+        request.setValue(sign, forHTTPHeaderField: "Sign")
 
         let body: [String: Any] = ["intent": "query.device.info", "data": [:]]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        log("Aqara: Fetching devices from \(baseURL)")
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = json["result"] as? [[String: Any]] else {
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse {
+            log("Aqara: Response status \(httpResponse.statusCode)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            log("Aqara: Failed to parse response")
             return []
         }
 
-        cachedDevices = result.compactMap { AqaraDevice(from: $0) }
+        // Check for API error
+        if let code = json["code"] as? Int, code != 0 {
+            let message = json["message"] as? String ?? "Unknown error"
+            log("Aqara API error: code=\(code), message=\(message)")
+            throw PluginError.authenticationFailed("Aqara API error \(code): \(message)")
+        }
+
+        // Parse result - could be nested in "result" > "data" or directly in "result"
+        var devices: [[String: Any]] = []
+        if let result = json["result"] as? [String: Any] {
+            if let data = result["data"] as? [[String: Any]] {
+                devices = data
+            }
+        } else if let result = json["result"] as? [[String: Any]] {
+            devices = result
+        }
+
+        log("Aqara: Found \(devices.count) devices in response")
+        cachedDevices = devices.compactMap { AqaraDevice(from: $0) }
         return cachedDevices
     }
 }

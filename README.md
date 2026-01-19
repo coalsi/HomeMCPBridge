@@ -119,7 +119,7 @@ HomeMCPBridge v2.0 introduces a plugin architecture that allows integration with
 |--------|----------------|-------------|
 | **Apple HomeKit** | Native (always enabled) | Direct access to HomeKit devices via Apple's framework |
 | **Govee** | API Key | Control Govee smart lights and appliances |
-| **Aqara** | OAuth 2.0 | Control Aqara sensors, switches, and smart home devices |
+| **Aqara** | API Key + Token | Control Aqara sensors, switches, and smart home devices |
 
 ### Configuring Plugins
 
@@ -140,17 +140,25 @@ HomeMCPBridge v2.0 introduces a plugin architecture that allows integration with
 ### Aqara Setup
 
 1. Register as a developer at [developer.aqara.com](https://developer.aqara.com)
-2. Create an application to get your Client ID and Client Secret
-3. In HomeMCPBridge, go to **Plugins > Aqara**
-4. Enter your Client ID, Client Secret, and region (us, eu, or cn)
-5. Complete the OAuth authorization flow
-6. Enable the Aqara plugin
+2. Create a project to get your **App ID**, **Key ID**, and **App Key**
+3. Go to **Authorization management** and authorize your Aqara account
+4. Copy the **Access Token** and **Refresh Token** from the authorization
+5. In HomeMCPBridge, go to **Plugins > Aqara** and enter:
+   - App ID (from your project)
+   - Key ID (found under App Key in project details)
+   - App Key (the secret key)
+   - Access Token (from authorization management)
+   - Refresh Token (from authorization management)
+   - Region: `cn` for China, `us` for USA, `eu` for Europe
+6. Save and enable the Aqara plugin
+
+**Note:** Access tokens expire after 7 days. Refresh tokens expire after 30 days. You'll need to re-authorize through the Aqara developer console when they expire.
 
 ### Devices Tab
 
 The new **Devices** tab shows all devices from all enabled plugins, organized by source:
 - See device names, types, rooms, and reachability status
-- Pull-to-refresh to update the device list
+- Use the refresh button (↻) to update the device list
 - Devices are grouped by HomeKit, Govee, Aqara, etc.
 
 ---
