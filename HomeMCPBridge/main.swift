@@ -4470,25 +4470,28 @@ class MainSplitController: UISplitViewController {
     private func showDetailViewController(for item: SidebarItem) {
         selectedIndex = SidebarItem.allCases.firstIndex(of: item) ?? 0
 
-        let viewController: UIViewController
+        // Create the content view controller
+        let contentVC: UIViewController
         switch item {
         case .status:
-            viewController = StatusViewController()
+            contentVC = StatusViewController()
         case .devices:
-            viewController = DevicesViewController()
+            contentVC = DevicesViewController()
         case .plugins:
-            let pluginsVC = PluginsViewController()
-            let navController = UINavigationController(rootViewController: pluginsVC)
-            viewController = navController
+            contentVC = PluginsViewController()
         case .mcpPost:
-            viewController = MCPPostViewController()
+            contentVC = MCPPostViewController()
         case .settings:
-            viewController = SetupViewController()
+            contentVC = SetupViewController()
         case .log:
-            viewController = LogViewController()
+            contentVC = LogViewController()
         }
 
-        setViewController(viewController, for: .secondary)
+        // Wrap all view controllers in UINavigationController for proper layout
+        // This ensures content doesn't display behind the sidebar
+        let navController = UINavigationController(rootViewController: contentVC)
+        navController.navigationBar.isHidden = true
+        setViewController(navController, for: .secondary)
     }
 
     func selectItem(_ item: SidebarItem) {
