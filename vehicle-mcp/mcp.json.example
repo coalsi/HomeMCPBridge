@@ -1,0 +1,17 @@
+{
+  "//": "Copy the relevant server block into your MCP client's config.",
+  "//stdio": "Use this when the client launches the server directly (same device).",
+  "mcpServers": {
+    "vehicle": {
+      "command": "python",
+      "args": ["/data/data/com.termux/files/home/vehicle-mcp/vehicle_mcp.py"],
+      "env": {
+        "OBD_PORT": "/dev/rfcomm0",
+        "OBD_TIMEOUT": "1.0",
+        "CAN_CHANNEL": "can0",
+        "CAN_INTERFACE": "socketcan",
+        "CAN_DBC": ""
+      }
+    }
+  }
+}

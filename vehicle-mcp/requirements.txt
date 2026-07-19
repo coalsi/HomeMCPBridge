@@ -1,0 +1,5 @@
+# Vehicle MCP Bridge dependencies (read-only vehicle data)
+mcp>=1.2.0          # Model Context Protocol server SDK (FastMCP)
+obd>=0.7.1          # python-OBD: ELM327 / OBDLink MX+ adapter support
+python-can>=4.3.0   # SocketCAN direct CAN bus reading
+cantools>=39.0.0    # optional: decode raw CAN frames with a .dbc file
