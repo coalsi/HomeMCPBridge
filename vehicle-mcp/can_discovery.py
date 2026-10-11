@@ -32,7 +32,6 @@ Usage:
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -43,6 +42,8 @@ except Exception as e:  # pragma: no cover
     print("python-can is required. Install with: pip install python-can\n"
           f"(import error: {e!r})", file=sys.stderr)
     sys.exit(1)
+
+from frame_diff import analyze_event, write_findings  # shared analyzer (stdlib)
 
 # ---------------------------------------------------------------------------
 # Default catalog of actions to characterize. Each has an OFF state and an ON
@@ -106,111 +107,7 @@ def capture(bus, window):
     return frames
 
 
-def bit_profile(frame_list):
-    """For one CAN ID's frames in a state, profile each bit.
 
-    Returns {bit_index: 'const0'|'const1'|'toggle'} and max byte length.
-    bit_index = byte*8 + bit, bit 0 = LSB of that byte.
-    """
-    if not frame_list:
-        return {}, 0
-    max_len = max(len(d) for d in frame_list)
-    profile = {}
-    for b in range(max_len):
-        for bit in range(8):
-            idx = b * 8 + bit
-            ones = zeros = 0
-            for d in frame_list:
-                if len(d) > b:
-                    if d[b] >> bit & 1:
-                        ones += 1
-                    else:
-                        zeros += 1
-            if ones and zeros:
-                profile[idx] = "toggle"
-            elif ones:
-                profile[idx] = "const1"
-            elif zeros:
-                profile[idx] = "const0"
-    return profile, max_len
-
-
-def merge_profiles(profiles):
-    """Merge per-round bit profiles for one ID+state into a pooled profile.
-
-    If a bit is const0 in every round -> const0; const1 in every round -> const1;
-    anything else (differs across rounds, or toggled) -> toggle.
-    """
-    merged = {}
-    all_bits = set()
-    for p in profiles:
-        all_bits |= set(p.keys())
-    for idx in all_bits:
-        vals = {p.get(idx) for p in profiles if idx in p}
-        if vals == {"const0"}:
-            merged[idx] = "const0"
-        elif vals == {"const1"}:
-            merged[idx] = "const1"
-        else:
-            merged[idx] = "toggle"
-    return merged
-
-
-def analyze_event(off_rounds, on_rounds):
-    """Compare OFF vs ON captures (lists of {id:[frames]}) -> candidate signals."""
-    off_ids = set().union(*[set(r) for r in off_rounds]) if off_rounds else set()
-    on_ids = set().union(*[set(r) for r in on_rounds]) if on_rounds else set()
-    candidates = []
-
-    # ID-presence candidates
-    for arb in sorted(on_ids - off_ids):
-        seen = sum(1 for r in on_rounds if arb in r)
-        candidates.append({
-            "type": "presence", "arbitration_id": arb, "id_hex": f"0x{arb:X}",
-            "meaning": "CAN ID present only in ON state",
-            "confidence": round(seen / max(1, len(on_rounds)), 2),
-        })
-    for arb in sorted(off_ids - on_ids):
-        seen = sum(1 for r in off_rounds if arb in r)
-        candidates.append({
-            "type": "presence", "arbitration_id": arb, "id_hex": f"0x{arb:X}",
-            "meaning": "CAN ID present only in OFF state",
-            "confidence": round(seen / max(1, len(off_rounds)), 2),
-        })
-
-    # Bit-level candidates for IDs present in both states
-    for arb in sorted(off_ids & on_ids):
-        off_prof = merge_profiles([bit_profile(r.get(arb, []))[0] for r in off_rounds])
-        on_prof = merge_profiles([bit_profile(r.get(arb, []))[0] for r in on_rounds])
-        for idx in sorted(set(off_prof) | set(on_prof)):
-            o = off_prof.get(idx)
-            n = on_prof.get(idx)
-            if o is None or n is None or o == n:
-                continue
-            byte_i, bit_i = divmod(idx, 8)
-            mask = 1 << bit_i
-            # per-round agreement for confidence
-            support = 0
-            rounds = min(len(off_rounds), len(on_rounds))
-            for k in range(rounds):
-                op = bit_profile(off_rounds[k].get(arb, []))[0].get(idx)
-                np_ = bit_profile(on_rounds[k].get(arb, []))[0].get(idx)
-                if op is not None and np_ is not None and op != np_:
-                    support += 1
-            ctype = "steady" if "toggle" not in (o, n) else "activity"
-            candidates.append({
-                "type": ctype,
-                "arbitration_id": arb, "id_hex": f"0x{arb:X}",
-                "byte": byte_i, "bit": bit_i, "bit_mask": f"0x{mask:02X}",
-                "off_state": o, "on_state": n,
-                "location": f"ID 0x{arb:X}, byte {byte_i}, bit {bit_i} (mask 0x{mask:02X})",
-                "confidence": round(support / max(1, rounds), 2),
-            })
-
-    # Strongest first
-    order = {"steady": 0, "activity": 1, "presence": 2}
-    candidates.sort(key=lambda c: (-c["confidence"], order.get(c["type"], 3)))
-    return candidates
 
 
 def prompt(msg):
@@ -220,38 +117,6 @@ def prompt(msg):
         print("\nStopping. Findings written so far are saved.")
         raise SystemExit(0)
 
-
-def write_findings(path, meta, results):
-    data = {"meta": meta, "signals": results}
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    md_path = os.path.splitext(path)[0] + ".md"
-    with open(md_path, "w") as f:
-        f.write(f"# CAN discovery findings\n\n")
-        f.write(f"- Channel: `{meta['channel']}` ({meta['interface']}), "
-                f"bitrate assumed at driver level\n")
-        f.write(f"- Rounds per event: {meta['rounds']}, window: {meta['window']}s\n")
-        f.write(f"- Bit convention: byte index 0-based; bit 0 = LSB of the byte\n\n")
-        for ev in results:
-            f.write(f"## {ev['name']} (`{ev['key']}`)\n\n")
-            hi = [c for c in ev["candidates"] if c["confidence"] >= 0.99]
-            if not ev["candidates"]:
-                f.write("_No consistent signal found. Try more rounds or a "
-                        "different bus/bitrate._\n\n")
-                continue
-            f.write("| conf | type | location | off → on |\n")
-            f.write("|------|------|----------|----------|\n")
-            for c in ev["candidates"][:12]:
-                loc = c.get("location", c.get("id_hex", ""))
-                trans = (f"{c.get('off_state','-')} → {c.get('on_state','-')}"
-                         if c["type"] != "presence" else c["meaning"])
-                f.write(f"| {c['confidence']:.2f} | {c['type']} | {loc} | {trans} |\n")
-            f.write("\n")
-            if hi:
-                best = hi[0]
-                f.write(f"**Best guess:** `{best.get('location', best['id_hex'])}` "
-                        f"— {ev['name']} maps here.\n\n")
-    return md_path
 
 
 def main():

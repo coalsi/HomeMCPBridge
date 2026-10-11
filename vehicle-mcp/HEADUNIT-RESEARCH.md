@@ -1,8 +1,10 @@
-# Head unit research: 15.6" GM Silverado/Sierra Qualcomm unit
+# Head unit research: GM Silverado head unit (ZXW GT6 → GT7A Pro)
 
-*Running memory for the mycarplay project. Compiled 2026-10-11 from public sources
-(linked inline). Nothing here was read off the actual device yet — see
-"Open questions" for what only the device can answer.*
+*Running memory for the mycarplay project. Two parts. **Part 1** (below) was
+compiled 2026-10-11 from public sources before any device facts were available;
+it describes the Amazon-listed SD665 unit, which turned out to be the truck's
+**previous** unit (GT6-CAR). **Part 2** (end of file) corrects it against
+`DEVICE-FACTS.md` from the Mac agent and sets the plan. Read Part 2 first.*
 
 Unit under study: Amazon ASIN B0DDCCJDVW, brand "VIKNAN", 15.6" vertical
 ("Tesla-style") 2K IPS, "Qualcomm 8G+128G", fits 2019–2023 Silverado/Sierra,
@@ -225,3 +227,68 @@ vendor service that feeds mycarplay. Also needed:
 5. With root → capture MCU↔Android serial while performing truck actions (same
    method as `can_discovery.py`, different source) → definitive signal map.
 6. Keep the OBDLink MX+ path as an independent raw-bus cross-check.
+
+---
+---
+
+# Part 2 — Corrections and plan after DEVICE-FACTS.md (2026-10-11)
+
+Source for everything in this part: `DEVICE-FACTS.md` + `device-facts/*` (Mac agent,
+from local records, provenance-tagged) and the ZXW community pages at
+[kamilbrk.github.io/headunits](https://kamilbrk.github.io/headunits/) (tagged
+[FROM DOCS]). Nothing in Part 2 was read off the device by this agent.
+
+## 2.1 What Part 1 got wrong, and what it got right
+
+| Topic | Part 1 said | Reality (DEVICE-FACTS) |
+|---|---|---|
+| Which unit | The Amazon SD665 / Android 13 unit | That was the **GT6-CAR**, the truck's *previous* unit. The truck now has a **ZXW / Shenzhen Choiceway GT7A Pro-CAR**: model `QCOM 685-GT7APro`, Snapdragon 685-class (SM6225-AD family), **Android 14 / SDK 34**, build `QCOM 685-GT7APro-GL-user-20260318.154007`, 1440×1920 portrait (MAD200JB1-3 panel, LT9211D bridge) |
+| Family | "ZXW / GT6" among the candidates | **Correct family.** Evidence: `VendorName=ZXW` in the privdata config partition, 33 `szchoiceway/choiceway/sykj/sylink` packages, `zxw_*` kernel/sysprop names. Not MTCH/Z35/Joying/Topway |
+| Root | "No root yet" | **adbd already runs as root** (`u:r:su:s0`), SELinux **Permissive**, vbmeta unlocked — Wi-Fi only (no USB debug port). But `/system`, `/product`, `/vendor` are **dm-verity enforcing**; no fastboot, no recovery, no exposed USB device port. Writable: `/data`, `/mnt/privdata1` |
+| CAN path | decoder → MCU → serial → vendor framework | Confirmed, in detail: decoder (fw `A3bA_s_A_251118`, Raise-family `0x2E` framing, brand unverified) → MCU (`RL9Ac_KWYa13___S077`) → `/dev/ttyHS1` @115200 → `com.szchoiceway.eventcenter` → broadcasts + AIDL → mycarplay. Frames to apps: `a5 2e cmd len payload crc` |
+| Profile | unknown | car type **16** = `CARTYPE_BUCIK_HI`, logo **349** = `CARTYPE_SILVERADO_NEW_22` (EventCenter's own tables; observed in logcat) |
+| "Data is off" cause | likely wrong decoder/trim selection | Partly. **The decoder on this profile passes only**: speed/rpm, coolant/oil/trans temps, oil pressure, HVAC, steering (event-driven), front doors (event-driven), factory video/touch. **The vendor's own dashboard shows `--` for gear, fuel, range, odometer, oil life, battery, TPMS, 4WD, outside temp** — an upstream decoder/profile limit, not an app bug. Those fields come today from the **OBDLink MX+ (GM single-wire CAN, validated map)** and/or the **ACX cluster's XCI box** |
+| Kernel source / custom OS | blocked | Still blocked, and moot: see 2.2 |
+
+The community-documented ZXW firmware is **Android 13** (GT7/GT7PRO builds `20240525GT_KSW` … `20250718GT_KSW`); the truck's **2026-03-18 Android 14** vendor build is newer than anything public. Do not install community GT7 files on it.
+
+## 2.2 The three questions, revised
+
+**Q1 — Custom firmware.** With dm-verity enforcing and no flash path (no fastboot, no recovery, no USB device mode observed), `/system`/`/product`/`/vendor` cannot be modified without EDL, and EDL here would mean opening the unit to reach the SoC's USB/test point — the exposed ports are host-mode. **Don't plan on a modified system image.** The good news: the goal is largely met without it. mycarplay already holds the HOME role alone, is direct-boot aware, and reaches every vendor function as a normal app through EventCenter. What remains vendor-imposed (ACC-standby force-stop with a hardcoded 4-package allowlist, Wi-Fi cycling) lives in EventCenter code and can only be designed around (fast resume), not removed. Lead, untested: the factory config key `usbHostMode` (0 = "debugging", 1 = "read USB disk") [FROM DOCS] may put an existing USB port into device mode — a factory-config write with real risk (see 2.3). Record it; don't act on it yet.
+
+**Q2 — Control without soldering.** Already have the most useful part: a root shell. The complete "dissection" is a **read-only dump of every partition** (`/dev/block/by-name/*` → `/data` via `dd` → `adb pull`, chunked, `sha256sum` both ends), analysed offline. privdata2/3 were already dumped on 2026-09-26. Write capability stays limited to `/data`, `/mnt/privdata1`, the vendor's config file and the vendor's own USB update mechanism.
+
+**Q3 — Wi-Fi.** It is the *only* debug path. Fine for reading and dumping with checksums. The link drops at every ACC standby (Wi-Fi cycled), so keep the ignition in RUN during long pulls and make dumps resumable. Nothing flashes over it anyway.
+
+## 2.3 What the ZXW community docs add [FROM DOCS]
+
+- **Factory configuration file** `zxw_factory_config.xml`, live at `/mnt/privdata1/zxw_factory_config.xml` (writable area; survives factory reset), importable from a FAT32 stick at `/OEM/zxw_factory_config.xml` via Factory settings → Profile Import → Update → Save and restart. Keys that bear on vehicle data: **`canProtocolSelection`, `carTypeSelection`, `gearType` (0–2), `speedType` (0/1), `doorAmount`, `wheelTrack`, `dashboardSelection`, `amplifierSelection`, `bootStartNavi`, `uiSelection`**, plus `usbHostMode` and `<factory><password>`. Warnings: a wrong value can lock you out of factory settings; a config from another unit changes screen/CAN/amp/camera; back up first. ([factory-settings/zxw](https://kamilbrk.github.io/headunits/factory-settings/zxw), [faq/zxw](https://kamilbrk.github.io/headunits/faq/zxw/))
+- **Pulling it is read-only:** `adb pull /mnt/privdata1/zxw_factory_config.xml` (if denied: `adb shell su -c "chmod +r /mnt/privdata1/zxw_factory_config.xml"`). This answers open item 5.1 (the profile in the vendor's own words) **without opening the menu**.
+- **Updates:** FAT32 stick, `update13_2.zip` (GT7 family; `_force` suffix skips the prompt) in the non-CarPlay USB port. No user recovery if the wrong platform's file is used. Latest public GT7 build `20250718GT_KSW` added "CAN Protocol Relay Mode" and "Original vehicle parameter error prompt" settings — relevant later if ZXW supplies a matching A14 package. ([updates/zxw/gt7](https://kamilbrk.github.io/headunits/updates/zxw/gt7/20250718gt_ksw))
+- **Identification on GT7 family:** `ro.board.platform=bengal` (shared with other boards), `soc_id` 518/561 = SM6225, vendor fingerprint `qti/bengal_515/...`. The truck's unit spoofs a Pixel fingerprint at system level, so check `ro.vendor.build.fingerprint` and `ro.board.platform` (open item 2.2). ([platforms/zxw/gt7](https://kamilbrk.github.io/headunits/platforms/zxw/gt7))
+- **Safety:** most failed updates are power loss mid-write; an interrupted MCU update is worse than an interrupted OTA; CAN-protocol changes "will not damage the car" but can silently break steering-wheel keys, sensors or the camera. ([safety](https://kamilbrk.github.io/headunits/safety))
+
+## 2.4 Tooling: the discovery loop, adapted to what this unit actually exposes
+
+There is no `can0` on the head unit, so `can_discovery.py` (SocketCAN) does not apply there. The same differential method now runs on capture **files** with **`frame_diff.py`** (stdlib only, runs on the Mac):
+
+- `--format mcu` — the vendor `a5 2e cmd len payload crc` frames as logged by mycarplay (MCUDEC / MCUPROBE) or the vendor Console. Frame id = cmd byte.
+- `--format elm` — OBDLink MX+ monitor output with headers (`ATH1 ATS1`), 29-bit GMLAN or 11-bit.
+- `--format candump` / `--format hex` — generic.
+
+Validated with synthetic captures: finds a planted door bit in MCU cmd `0x24` and a P→R PRNDL flip in GMLAN `0x102CC040`, rejects within-state noise and constants. Output schema unchanged (`findings.schema.json`). Procedure: for each action in `truck-tasks.md`, save one capture file per OFF state and one per ON state, 3 repeats; then
+`frame_diff.py --format mcu --event door_driver --off o1.log --on n1.log --off o2.log --on n2.log --off o3.log --on n3.log`
+or a batch `--plan plan.json`.
+
+## 2.5 Plan to make the truck data reliable (prioritized)
+
+1. **Read the live factory config** (read-only pull, 2.3). Record `canProtocolSelection`, `carTypeSelection`, `gearType`, `speedType`, `doorAmount`, `usbHostMode`. If `gearType`/`speedType` exist on this profile they are candidate levers for `gearInfo = 0` — changing them is an owner decision (backup, parked, revertible).
+2. **Passive MCU capture session** (parked, engine running): enable raw-frame logging in mycarplay (MCUDEC tag or `setprop log.tag.MCUPROBE V`), run the `truck-tasks.md` actions, split logcat per state, analyse with `frame_diff.py --format mcu`. Settles DEVICE-FACTS 5.11 (door byte offset), 5.13 (steering scale vs a counted lock-to-lock), 5.14 (wheel-key codes via `MCU_KEY_INFOR`), 5.12 (`0x0B` vs GPS speed, after a drive), and surfaces any cmd bits the decoder *does* pass that nobody decodes yet (rear doors/hood/tailgate in `0x24`, lighting, park brake).
+3. **Same session, MX+ body-bus logs per action** → `frame_diff.py --format elm`. Settles the open body-bus items: park-brake steady value (`0x115`), doors (`0x318/0x17B/0x17C/0x17D`), fuel header (`0C800040` vs `10800040`), hazards/high-beam/brake-lamp bits (`0x106`), ignition (`0x121`); TPMS needs rolling.
+4. **Code fixes needing no capture** (DEVICE-FACTS §4.4): accept both fuel/pitch headers; stop treating `CAN_CAR_OUT_SIDE_TEMP_EVT` as live; log raw `0x24/0x36/0x0B` and key values; fix stale docs ("car type 84", GT6 "in the truck", GMLAN labels).
+5. **Full read-only partition dump** to the archive (root adb; chunked; verified) — the no-soldering dissection, and insurance.
+6. **Vendor asks (no device risk):** the GT7APro firmware package matching FrameworkVer `20260318.154007` (reference copy); whether a GM/Silverado profile exists that passes gear/fuel/odometer/TPMS (the vendor Console carries `isChSimpleGm19Silverado8Inch` predicates for a `canbus2` app this unit does not have — a hint that a richer GM profile exists in the vendor's catalogue).
+
+## 2.6 Rules carried over from DEVICE-FACTS (keep)
+
+Never write `/system`, `/product`, `/vendor`. Never launch `com.lfg.szchoiceway.canupgrade`. Never send MCU source claim `01 0B` (kills FM). Air keys 20/33 and anything else outbound to the bus only with the owner's explicit, per-test OK. Factory-config and NaviSettings changes are not read-only. Access codes stay out of this repo.
