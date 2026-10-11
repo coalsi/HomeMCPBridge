@@ -4,6 +4,12 @@ Goal: figure out **which CAN signals correspond to which truck states** (doors,
 blinkers, parking brake, brakes, lights…) so the mycarplay app can read them
 reliably, then hand a precise signal map to the Mac APK-builder agent.
 
+> **Scope note (added after researching the head unit):** this tool reads a *raw*
+> CAN bus via SocketCAN — i.e. a direct tap or USB/BT CAN adapter. The head unit
+> itself almost certainly has **no `can0`**: it receives vehicle data from a CAN
+> decoder box over a serial link parsed by the vendor firmware. See
+> `HEADUNIT-RESEARCH.md` §2 for that path and how to capture it (needs root).
+
 ## Who does what
 
 The bus lives in the truck, on the Android head unit. So the live capture must
