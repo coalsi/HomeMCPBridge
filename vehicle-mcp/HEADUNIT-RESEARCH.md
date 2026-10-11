@@ -140,8 +140,10 @@ Ordered by risk, lowest first. Stop at the first one that works.
    work is already done*: dump partitions from `/dev/block/by-name`, modify
    `/system`, no flashing needed.
 2. **Factory Settings password.** Opens decoder selection, MCU info, developer
-   options. Codes vary per firmware: common ones **8888, 1234, 000000, 126,
-   3368**, date-based (`yyyymmdd` / `yyyy.mm.dd`), or `7890`+hour
+   options. **The code for this unit is known to the owner (confirmed working
+   2026-10-11) — deliberately not stored in this repo.** For reference, other
+   firmwares use **8888, 1234, 000000, 126, 3368**, date-based
+   (`yyyymmdd` / `yyyy.mm.dd`), or `7890`+hour
    ([XDA](https://xdaforums.com/t/android-head-unit-factory-setting-password.4063267/),
    [pin list](https://android-headunits.com/pin-codes-for-android-headunit/)).
    Also simply ask the seller — they usually give it.
