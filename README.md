@@ -335,6 +335,10 @@ HomeMCPBridge:
 
 Contributions welcome! Feel free to open issues or submit PRs.
 
+## Support
+
+If this is useful to you, you can support my work on [GitHub Sponsors](https://github.com/sponsors/coalsi) or [Ko-fi](https://ko-fi.com/coreysilvia).
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
